@@ -422,6 +422,41 @@ app.delete('/api/positions/:id', requireAdmin, (req, res) => {
     if (e.defaultPositionId === req.params.id) delete e.defaultPositionId;
     if (e.positionWages) delete e.positionWages[req.params.id];
   });
+  db.data.payRates = db.data.payRates.filter(r => r.positionId !== req.params.id);
+  db.persist();
+  res.json({ ok: true });
+});
+
+// ---------- pay rates (standard rate for a location+position combo, e.g.
+// "any Driver at Tony's earns $2.50/hr" — separate from an individual
+// employee's own wage, which is only used as a fallback where no rate card
+// entry covers that shift's location+position). positionId of null means
+// the rate applies regardless of position (e.g. a flat rate for private
+// events). payType 'salary' stores an ANNUAL amount, tracked as its own
+// line in labor cost rather than multiplied by shift hours.
+app.get('/api/pay-rates', requireScheduler, (req, res) => {
+  res.json({ payRates: db.data.payRates });
+});
+
+app.post('/api/pay-rates', requireAdmin, (req, res) => {
+  let { lot, positionId, payType, rate } = req.body || {};
+  lot = (lot || '').trim();
+  if (!lot) return res.status(400).json({ error: 'Enter a location.' });
+  if (payType !== 'hourly' && payType !== 'salary') return res.status(400).json({ error: 'Invalid pay type.' });
+  const n = Number(rate);
+  if (!Number.isFinite(n) || n < 0) return res.status(400).json({ error: 'Enter a valid rate.' });
+  if (positionId) {
+    const pos = db.data.positions.find(p => p.id === positionId);
+    if (!pos) return res.status(400).json({ error: 'Position not found.' });
+  }
+  const entry = { id: uid('rate'), lot, positionId: positionId || null, payType, rate: n };
+  db.data.payRates.push(entry);
+  db.persist();
+  res.json({ payRate: entry });
+});
+
+app.delete('/api/pay-rates/:id', requireAdmin, (req, res) => {
+  db.data.payRates = db.data.payRates.filter(r => r.id !== req.params.id);
   db.persist();
   res.json({ ok: true });
 });

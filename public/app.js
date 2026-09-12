@@ -24,6 +24,19 @@ function rateFor(employeeId, positionId){
   if(positionId && w.positionWages && w.positionWages[positionId]!==undefined) return w.positionWages[positionId];
   return w.hourlyWage || 0;
 }
+
+let payRates = []; // [ {id, lot, positionId|null, payType:'hourly'|'salary', rate} ] — standard rate for a location+position combo, e.g. "Driver at Tony's = $2.50/hr"; positionId null = applies regardless of position
+
+// A shift's location+position combo checks the shared rate card first (an
+// exact position match, then a lot-wide "any position" entry); only falls
+// back to the individual employee's own wage when nothing on the card
+// covers that combo.
+function payRateFor(lot, positionId){
+  let match = payRates.find(r=> r.lot===lot && r.positionId===positionId);
+  if(!match) match = payRates.find(r=> r.lot===lot && !r.positionId);
+  return match || null;
+}
+
 let shiftTemplates = []; // [ {id, label, start, end} ]
 let timeEntries = []; // [ {id, employeeId, date, clockIn, clockOut} ] — current timesheets week
 let clockStatus = null; // staff's own open time-clock entry, or null
@@ -45,6 +58,7 @@ let adminLoginError = null;
 let importResultMsg = null;
 let positionError = null;
 let groupError = null;
+let payRateError = null;
 let templateError = null;
 let timesheetError = null;
 let teamError = null;
@@ -140,10 +154,11 @@ async function loadProtectedData(){
   groups = groupRes.groups;
 
   if(isScheduler()){
-    const [wageRes, tmplRes, logRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates'), api('/api/availability-log') ]);
+    const [wageRes, tmplRes, logRes, rateRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates'), api('/api/availability-log'), api('/api/pay-rates') ]);
     wages = wageRes.wages;
     shiftTemplates = tmplRes.templates;
     availabilityLog = logRes.log;
+    payRates = rateRes.payRates;
     await loadTimesheets();
   }
   if(isFullAdmin()){
@@ -228,7 +243,7 @@ async function loginEmployee(email, password){
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
-  employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
+  employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; payRates = []; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
   wages = {}; shiftTemplates = []; timeEntries = []; clockStatus = null; admins = [];
   render();
 }
@@ -394,6 +409,29 @@ async function toggleStaffGroup(empId, groupId, checked){
     const res = await api(`/api/employees/${empId}`, { method:'PATCH', body: JSON.stringify({ groupIds: next }) });
     emp.groupIds = res.employee.groupIds || [];
   }catch(e){ loadError = e.message; }
+  render();
+}
+
+// ---------- pay rates ----------
+async function addPayRate(){
+  const lot = (document.getElementById('newRateLot')||{}).value?.trim();
+  const positionId = (document.getElementById('newRatePosition')||{}).value || null;
+  const payType = (document.getElementById('newRateType')||{}).value;
+  const rate = (document.getElementById('newRateAmount')||{}).value;
+  if(!lot){ payRateError = 'Enter a location.'; render(); return; }
+  if(rate === '' || Number(rate) < 0){ payRateError = 'Enter a valid rate.'; render(); return; }
+  try{
+    const res = await api('/api/pay-rates', { method:'POST', body: JSON.stringify({ lot, positionId, payType, rate }) });
+    payRates.push(res.payRate);
+    payRateError = null;
+  }catch(e){ payRateError = e.message; }
+  render();
+}
+async function removePayRate(id){
+  try{
+    await api(`/api/pay-rates/${id}`, { method:'DELETE' });
+    payRates = payRates.filter(r=>r.id!==id);
+  }catch(e){ payRateError = e.message; }
   render();
 }
 
@@ -1366,6 +1404,7 @@ function buildScheduleRows(dates, filterEmps){
   // weekly scheduled hours per row key (for overtime warnings) and cost per employee
   const weeklyHours = {};
   let totalCost = 0;
+  const salaryCards = new Map(); // rate-card id -> annual amount, deduped so a salaried role counts once per week no matter how many shifts reference it
   Object.keys(cells).forEach(k=>{
     const key = k.split('|')[0];
     if(key==='OPEN') return;
@@ -1374,25 +1413,32 @@ function buildScheduleRows(dates, filterEmps){
       const end = b.kind==='slot' ? b.end : b.shift.end;
       const hrs = shiftHours(start, end);
       weeklyHours[key] = (weeklyHours[key]||0) + hrs;
-      totalCost += hrs * rateFor(key, b.shift ? b.shift.positionId : null);
+      const lot = b.kind==='slot' ? b.lot : (b.shift ? b.shift.lot : null);
+      const positionId = b.shift ? b.shift.positionId : null;
+      const card = lot ? payRateFor(lot, positionId) : null;
+      if(card && card.payType==='salary') salaryCards.set(card.id, card.rate);
+      else if(card) totalCost += hrs * card.rate;
+      else totalCost += hrs * rateFor(key, positionId);
     });
   });
+  const salaryTotal = Array.from(salaryCards.values()).reduce((a,b)=>a+b,0);
 
   const rowKeys = [{key:'OPEN', label:'Open Shifts'}].concat(
     filterEmps.map(e=>({key:e.id, label:e.name, hours:weeklyHours[e.id]||0}))
   );
 
-  return { cells, rowKeys, totalCost };
+  return { cells, rowKeys, totalCost, salaryTotal };
 }
 
 function renderEmployeeGrid(dates, readOnly, filterEmps){
-  const { cells, rowKeys, totalCost } = buildScheduleRows(dates, filterEmps);
+  const { cells, rowKeys, totalCost, salaryTotal } = buildScheduleRows(dates, filterEmps);
   const showCost = isScheduler() && !readOnly;
 
   let html = '';
   if(showCost){
-    html += `<div class="row" style="justify-content:flex-end;margin-bottom:8px;">
-      <span class="tag unset" style="font-size:12.5px;">Estimated labor cost: $${totalCost.toFixed(2)}</span>
+    html += `<div class="row" style="justify-content:flex-end;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+      <span class="tag unset" style="font-size:12.5px;">Estimated hourly labor: $${totalCost.toFixed(2)}</span>
+      ${salaryTotal>0 ? `<span class="tag unset" style="font-size:12.5px;">Salaried roles: $${(salaryTotal/52).toFixed(2)}/wk ($${salaryTotal.toLocaleString()}/yr)</span>` : ''}
     </div>`;
   }
   html += `<div class="schedgrid-wrap"><table class="schedgrid"><thead><tr><th class="schedgrid-namecol"></th>`;
@@ -1683,6 +1729,8 @@ function renderManagerView(){
     <button class="primary" style="width:100%;margin-top:12px;" data-action="addgroup">Add group</button>
   </div>`;
 
+  html += renderPayRates();
+
   const dates = getWeekDates(weekOffset);
   const emps = employees.filter(e=>!e.archived).sort((a,b)=>a.name.localeCompare(b.name));
   const archivedEmps = employees.filter(e=>e.archived).sort((a,b)=>a.name.localeCompare(b.name));
@@ -1738,6 +1786,46 @@ function renderManagerView(){
   html += renderStaffDirectory(emps);
   html += renderArchivedStaff(archivedEmps);
 
+  return html;
+}
+
+function knownLocationsHtml(){
+  const known = new Set([...LOTS, ...Object.keys(DAILY_TEMPLATES), 'Private Event']);
+  shifts.forEach(s=>{ if(s.lot) known.add(s.lot); });
+  return Array.from(known).sort().map(l=>`<option value="${l}"></option>`).join('');
+}
+
+function renderPayRates(){
+  let html = '';
+  if(payRateError) html += `<div class="err">${payRateError}</div>`;
+  html += `<div class="card">
+    <h2>Pay Rates</h2>
+    <p class="empty" style="padding:0 0 10px;">A standard rate for a location+position combo — e.g. any Driver at Tony's earns $2.50/hr, regardless of who's working. Applies to whoever's on that shift instead of needing a rate set per employee. Leave position as "Any position" for a flat rate like private events.</p>
+    ${payRates.length ? payRates.map(r=>{
+      const pos = r.positionId ? positions.find(p=>p.id===r.positionId) : null;
+      const amount = r.payType==='salary' ? `$${r.rate.toLocaleString()}/yr` : `$${r.rate.toFixed(2)}/hr`;
+      return `<div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+        <span>${r.lot} — ${pos?pos.name:'Any position'}: <strong>${amount}</strong></span>
+        <button class="danger" data-action="removepayrate" data-id="${r.id}">Remove</button>
+      </div>`;
+    }).join('') : '<p class="empty" style="padding:0 0 10px;">No pay rates set yet — employees are paid their own base/position wage everywhere.</p>'}
+    <label style="margin-top:12px;">Location</label>
+    <input type="text" id="newRateLot" list="knownLocations" placeholder="e.g. Tony's" />
+    <datalist id="knownLocations">${knownLocationsHtml()}</datalist>
+    <label style="margin-top:10px;">Position</label>
+    <select id="newRatePosition">
+      <option value="">Any position</option>
+      ${positions.map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}
+    </select>
+    <label style="margin-top:10px;">Pay type</label>
+    <select id="newRateType">
+      <option value="hourly">Hourly</option>
+      <option value="salary">Salary (annual)</option>
+    </select>
+    <label style="margin-top:10px;">Rate</label>
+    <input type="number" min="0" step="0.01" id="newRateAmount" placeholder="e.g. 2.50 hourly, or 40000 annual salary" />
+    <button class="primary" style="width:100%;margin-top:12px;" data-action="addpayrate">Add pay rate</button>
+  </div>`;
   return html;
 }
 
@@ -1912,6 +2000,8 @@ function bindEvents(){
   app.querySelectorAll('[data-action="staffgroup"]').forEach(el=> el.onchange = ()=>{
     toggleStaffGroup(el.dataset.id, el.dataset.group, el.checked);
   });
+  app.querySelectorAll('[data-action="addpayrate"]').forEach(b=> b.onclick = ()=> addPayRate());
+  app.querySelectorAll('[data-action="removepayrate"]').forEach(b=> b.onclick = ()=> removePayRate(b.dataset.id));
   app.querySelectorAll('input[name="newPositionColor"]').forEach(radio=>{
     const sync = ()=>{
       app.querySelectorAll('.colorswatch').forEach(sw=>{

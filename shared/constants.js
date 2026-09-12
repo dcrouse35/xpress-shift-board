@@ -1,5 +1,5 @@
 (function (root) {
-  const LOTS = ["Calvary Baptist","FUMC","First Pres","Burl Lot","Broadway","Jefferson","Tony's Storage"];
+  const LOTS = ["Calvary Baptist","FUMC","First Pres","Burl Lot","Broadway","Jefferson","Tony's Storage","Apiary"];
 
   const DEFAULT_ROSTER = [
     "AJ Abram","Ransom Anotine","Luke Argamasilla","Blake Ball","Caden Barrett","Cameron Bays","Brody Beall",
