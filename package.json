@@ -1,0 +1,16 @@
+{
+  "name": "xpress-shift-board",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Shift scheduling board for Xpress Parking Services",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0"
+  }
+}

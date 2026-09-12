@@ -1,0 +1,5 @@
+node_modules/
+data/db.json
+data/.session-secret
+tools/
+.claude/
