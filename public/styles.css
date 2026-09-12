@@ -94,7 +94,6 @@ button:disabled{opacity:.5;cursor:default;}
 .statebtn:active{transform:scale(.96);}
 .statebtn svg{width:13px;height:13px;flex-shrink:0;}
 .statebtn.available{background:var(--go-bg);color:var(--go);}
-.statebtn.if_needed{background:var(--caution-bg);color:var(--caution);}
 .statebtn.unavailable{background:var(--stop-bg);color:var(--stop);}
 
 /* summary list */
@@ -102,7 +101,6 @@ button:disabled{opacity:.5;cursor:default;}
 .summaryline:last-child{border-bottom:none;}
 .summaryline .tag{font-weight:700;font-size:12px;padding:4px 10px;border-radius:999px;}
 .tag.available{color:var(--go);background:var(--go-bg);}
-.tag.if_needed{color:var(--caution);background:var(--caution-bg);}
 .tag.unavailable{color:var(--stop);background:var(--stop-bg);}
 .tag.unset{color:var(--ink-muted);background:var(--bg);font-weight:600;}
 
@@ -113,7 +111,6 @@ button:disabled{opacity:.5;cursor:default;}
 .schedtable td.namecell{text-align:left;font-weight:700;font-size:12.5px;white-space:nowrap;color:var(--ink);}
 .dot{width:18px;height:18px;border-radius:50%;display:inline-block;background:var(--line);}
 .dot.available{background:var(--go);}
-.dot.if_needed{background:var(--caution);}
 .dot.unavailable{background:var(--stop);}
 
 .breakdown{margin-top:2px;}
@@ -122,7 +119,6 @@ button:disabled{opacity:.5;cursor:default;}
 .blist .btitle{font-size:11px;font-weight:800;letter-spacing:.03em;margin-bottom:5px;display:inline-block;padding:3px 9px;border-radius:999px;}
 .blist .names{font-size:13.5px;line-height:1.6;color:var(--ink-soft);}
 .blist.available .btitle{color:var(--go);background:var(--go-bg);}
-.blist.if_needed .btitle{color:var(--caution);background:var(--caution-bg);}
 .blist.unavailable .btitle{color:var(--stop);background:var(--stop-bg);}
 .blist.unset .btitle{color:var(--ink-muted);background:var(--bg);}
 

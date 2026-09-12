@@ -21,8 +21,8 @@
     "Charlie Wainscott","Parker Warren","Elijah Webb","Cole Wethington","Keundray Williams","Kevin Worthy"
   ];
 
-  const STATE_ORDER = [null, "available", "if_needed", "unavailable"];
-  const STATE_LABEL = { available: "Available", if_needed: "If needed", unavailable: "Unavailable" };
+  const STATE_ORDER = [null, "available", "unavailable"];
+  const STATE_LABEL = { available: "Available", unavailable: "Unavailable" };
 
   // Fixed daily shift slots — these repeat every applicable day automatically.
   // days: 'all' or an array of JS getDay() values (0=Sun...6=Sat). Fri=5, Sat=6.

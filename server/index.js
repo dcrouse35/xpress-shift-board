@@ -180,6 +180,9 @@ app.get('/api/availability', (req, res) => {
 app.put('/api/availability/:date', requireLogin, (req, res) => {
   const date = req.params.date;
   const state = (req.body && req.body.state) || null;
+  if (state !== null && state !== 'available' && state !== 'unavailable') {
+    return res.status(400).json({ error: 'Invalid availability state.' });
+  }
   if (!db.data.availability[req.employee.id]) db.data.availability[req.employee.id] = {};
   if (state === null) delete db.data.availability[req.employee.id][date];
   else db.data.availability[req.employee.id][date] = state;

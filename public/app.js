@@ -19,9 +19,8 @@ let loaded = false;
 let loadError = null;
 
 function icon(name){
-  if(name==="available") return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M4 12l5 5L20 6"/></svg>';
-  if(name==="if_needed") return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12h14"/></svg>';
-  if(name==="unavailable") return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  if(name==="available") return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11v10H4a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1h3zm0 0 4.5-8a2 2 0 0 1 3.8.9L14.5 9H19a2 2 0 0 1 2 2.3l-1.4 8A3 3 0 0 1 16.6 22H10a3 3 0 0 1-3-3"/></svg>';
+  if(name==="unavailable") return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 13V3h3a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-3zm0 0-4.5 8a2 2 0 0 1-3.8-.9L9.5 15H5a2 2 0 0 1-2-2.3l1.4-8A3 3 0 0 1 7.4 2H14a3 3 0 0 1 3 3"/></svg>';
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>';
 }
 
@@ -253,9 +252,7 @@ function addAssigneeOptionsHtml(iso, excludeIds){
     if(excludeIds.includes(emp.id)) return;
     const st = (availability[emp.id] && availability[emp.id][iso]) || null;
     if(st === 'unavailable') return;
-    let label = emp.name;
-    if(st === 'if_needed') label += ' (if needed)';
-    opts += `<option value="${emp.id}">${label}</option>`;
+    opts += `<option value="${emp.id}">${emp.name}</option>`;
   });
   return opts;
 }
@@ -589,7 +586,6 @@ function slotOptionsHtml(iso, assignedId){
     const st = (availability[emp.id] && availability[emp.id][iso]) || null;
     if(st === 'unavailable' && emp.id !== assignedId) return;
     let label = emp.name;
-    if(st === 'if_needed') label += ' (if needed)';
     if(st === 'unavailable') label += ' (unavailable)';
     options += `<option value="${emp.id}" ${emp.id===assignedId?'selected':''}>${label}</option>`;
   });
@@ -711,7 +707,7 @@ function renderManagerView(){
   if(openDayKey && emps.length){
     const d = dates.find(dd=>toISO(dd)===openDayKey);
     if(d){
-      const groups = {available:[], if_needed:[], unavailable:[], unset:[]};
+      const groups = {available:[], unavailable:[], unset:[]};
       emps.forEach(emp=>{
         const state = (availability[emp.id] && availability[emp.id][openDayKey]) || 'unset';
         groups[state].push(emp.name);
@@ -719,7 +715,6 @@ function renderManagerView(){
       html += `<div class="card breakdown">
         <h3>${fmtDayName(d)}, ${fmtDayShort(d)} — ${managerLot==='__ALL__'?'All Lots':managerLot}</h3>
         ${renderGroup('available','Available',groups.available)}
-        ${renderGroup('if_needed','If needed',groups.if_needed)}
         ${renderGroup('unavailable','Unavailable',groups.unavailable)}
         ${renderGroup('unset',"Haven't responded",groups.unset)}
       </div>`;
