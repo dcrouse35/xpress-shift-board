@@ -1120,7 +1120,7 @@ function renderStaffDirectory(emps){
   if(emps.length===0){
     html += `<p class="empty">No staff to show for this lot yet.</p>`;
   } else {
-    html += emps.map(emp=>`
+    html += `<div class="staffdirectory-grid">` + emps.map(emp=>`
       <div class="staffcard">
         <div class="staffcard-head">
           <input type="text" class="staffname" value="${emp.name}" data-action="staffedit" data-id="${emp.id}" data-field="name" />
@@ -1135,7 +1135,7 @@ function renderStaffDirectory(emps){
         </div>
         <div class="staffcard-status">${emp.onboarded ? 'Signed up' : 'Not signed up yet'}</div>
       </div>
-    `).join('');
+    `).join('') + `</div>`;
   }
   html += `</div>`;
   return html;
