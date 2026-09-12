@@ -1,10 +1,11 @@
-const { LOTS, EMP_HOME_TAGS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies } = window.APP_CONSTANTS;
+const { LOTS, EMP_HOME_TAGS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS } = window.APP_CONSTANTS;
 
 let employees = [];
 let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } }
-let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, end, draft, open?} ]
+let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, end, draft, open?, positionId?} ]
 let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
 let ptoRequests = []; // [ {id, employeeId, startDate, endDate, reason, status, createdAt} ]
+let positions = []; // [ {id, name, color} ]
 
 let me = null;    // logged-in staff identity (sanitized), or null
 let admin = null; // logged-in admin identity (sanitized), or null
@@ -12,14 +13,15 @@ let authView = 'staff'; // which gate form shows when nobody is logged in: 'staf
 let staffTab = 'my';     // 'my' | 'schedule' | 'timeoff'
 let adminTab = 'schedule'; // 'schedule' | 'staff' | 'timeoff'
 
-let managerLot = LOTS[0];
-let editingShiftId = null;
+let managerLot = '__ALL__';
+let scheduleEditor = null; // { type:'slot', date, lot, slotId, start, end } | { type:'shift', shiftId } | { type:'newcustom', employeeId, date }
 let addShiftError = null;
 let signupError = null;
 let loginError = null;
 let adminSignupError = null;
 let adminLoginError = null;
 let importResultMsg = null;
+let positionError = null;
 let weekOffset = 0; // 0 = this week
 let openDayKey = null; // for admin breakdown panel
 let loaded = false;
@@ -93,14 +95,20 @@ async function loadAll(){
 }
 
 async function loadProtectedData(){
-  const [empRes, availRes, shiftRes, swapRes, ptoRes] = await Promise.all([
-    api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto')
+  const [empRes, availRes, shiftRes, swapRes, ptoRes, posRes] = await Promise.all([
+    api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto'), api('/api/positions')
   ]);
   employees = empRes.employees;
   availability = availRes.availability;
   shifts = shiftRes.shifts;
   swapRequests = swapRes.swaps;
   ptoRequests = ptoRes.requests;
+  positions = posRes.positions;
+}
+
+async function refreshShifts(){
+  const sres = await api('/api/shifts');
+  shifts = sres.shifts;
 }
 
 async function setDayState(empId, dateISO, newState){
@@ -153,7 +161,7 @@ async function loginEmployee(email, password){
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
-  employees = []; availability = {}; shifts = []; swapRequests = []; ptoRequests = [];
+  employees = []; availability = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = [];
   render();
 }
 
@@ -225,6 +233,43 @@ async function removeStaffMember(empId){
     shifts.forEach(s=>{ s.employeeIds = (s.employeeIds||[]).filter(id=>id!==empId); });
   }catch(e){ loadError = e.message; }
   render();
+}
+
+// ---------- positions ----------
+async function addPosition(){
+  const nameInput = document.getElementById('newPositionName');
+  const colorInput = document.querySelector('input[name="newPositionColor"]:checked');
+  const name = nameInput ? nameInput.value.trim() : '';
+  if(!name){ positionError = "Enter a position name."; render(); return; }
+  const color = colorInput ? colorInput.value : POSITION_COLORS[0];
+  try{
+    const res = await api('/api/positions', { method:'POST', body: JSON.stringify({ name, color }) });
+    positions.push(res.position);
+    positionError = null;
+  }catch(e){ positionError = e.message; }
+  render();
+}
+async function removePosition(id){
+  if(!confirm('Remove this position? Shifts already tagged with it keep their color until edited.')) return;
+  try{
+    await api(`/api/positions/${id}`, { method:'DELETE' });
+    positions = positions.filter(p=>p.id!==id);
+    shifts.forEach(s=>{ if(s.positionId===id) s.positionId = null; });
+    employees.forEach(e=>{ if(e.defaultPositionId===id) e.defaultPositionId = null; });
+  }catch(e){ positionError = e.message; }
+  render();
+}
+function positionOptionsHtml(selectedId){
+  let html = `<option value="">No position</option>`;
+  positions.forEach(p=> html += `<option value="${p.id}" ${p.id===selectedId?'selected':''}>${p.name}</option>`);
+  return html;
+}
+function colorForShift(s){
+  if(s && s.positionId){
+    const pos = positions.find(p=>p.id===s.positionId);
+    if(pos) return pos.color;
+  }
+  return null;
 }
 
 // ---------- shift swaps ----------
@@ -327,51 +372,62 @@ function fmtDateShort(iso){ return new Date(iso+'T00:00:00').toLocaleDateString(
 // ---------- shifts ----------
 function getShiftEmployeeIds(s){ return s.employeeIds || []; }
 
-function findShift(shiftId){
-  const shift = shifts.find(s=>s.id===shiftId);
-  return shift ? { dateISO: shift.date, shift } : null;
+function slotOptionsHtml(iso, assignedId){
+  const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  let options = `<option value="">— Open —</option>`;
+  sortedEmps.forEach(emp=>{
+    const st = (availability[emp.id] && availability[emp.id][iso]) || null;
+    if(st === 'unavailable' && emp.id !== assignedId) return;
+    let label = emp.name;
+    if(st === 'unavailable') label += ' (unavailable)';
+    options += `<option value="${emp.id}" ${emp.id===assignedId?'selected':''}>${label}</option>`;
+  });
+  return options;
 }
 
-async function submitCustomShift(){
-  const nameInput = document.getElementById('newShiftName');
-  const locSelect = document.getElementById('newShiftLocation');
-  const customLocInput = document.getElementById('newShiftCustomLocation');
-  const dateSelect = document.getElementById('newShiftDate');
-  const startInput = document.getElementById('newShiftStart');
-  const endInput = document.getElementById('newShiftEnd');
-  const assignSelect = document.getElementById('newShiftAssign');
-  const openCheckbox = document.getElementById('newShiftOpen');
-  if(!locSelect || !dateSelect) return;
-
-  let lot = locSelect.value;
-  if(lot === '__CUSTOM__'){
-    lot = (customLocInput ? customLocInput.value : '').trim();
-    if(!lot){
-      addShiftError = "Enter a name for the custom location.";
-      render();
-      return;
-    }
-  }
-  const date = dateSelect.value;
-  const start = startInput.value || '09:00';
-  const end = endInput.value || '17:00';
-  const open = openCheckbox ? openCheckbox.checked : false;
-  const employeeId = (!open && assignSelect && assignSelect.value) ? assignSelect.value : null;
-  const customName = nameInput ? nameInput.value.trim() : '';
-
-  try{
-    const res = await api('/api/shifts', { method:'POST', body: JSON.stringify({ date, lot, customName: customName || null, start, end, employeeId, open }) });
-    shifts.push(res.shift);
-    addShiftError = null;
-  }catch(e){ addShiftError = e.message; }
-  render();
+function addAssigneeOptionsHtml(iso, excludeIds){
+  const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  let opts = '<option value="">+ Add staff…</option>';
+  sortedEmps.forEach(emp=>{
+    if(excludeIds.includes(emp.id)) return;
+    const st = (availability[emp.id] && availability[emp.id][iso]) || null;
+    if(st === 'unavailable') return;
+    opts += `<option value="${emp.id}">${emp.name}</option>`;
+  });
+  return opts;
 }
 
-async function assignSlot(dateISO, lot, slotId, start, end, employeeId){
+// copy-to-other-days / future-weeks controls, shared by the slot and new-shift editors
+function renderCopyOptionsHtml(prefix){
+  const days = [
+    {n:0,label:'Sun'},{n:1,label:'Mon'},{n:2,label:'Tue'},{n:3,label:'Wed'},{n:4,label:'Thu'},{n:5,label:'Fri'},{n:6,label:'Sat'}
+  ];
+  return `<div style="margin-top:12px;">
+    <label>Also copy to these days this week</label>
+    <div class="row" style="flex-wrap:wrap;gap:10px;">
+      ${days.map(d=>`<label style="display:inline-flex;align-items:center;gap:4px;font-weight:600;color:var(--ink-soft);margin:0;">
+        <input type="checkbox" class="${prefix}-copyday" value="${d.n}" style="width:auto;" /> ${d.label}
+      </label>`).join('')}
+    </div>
+    <div class="row" style="margin-top:8px;align-items:center;">
+      <input type="checkbox" id="${prefix}-repeat4" style="width:auto;" />
+      <label style="margin:0;" for="${prefix}-repeat4">Also repeat for the next 4 weeks</label>
+    </div>
+  </div>`;
+}
+function readCopyOptions(prefix){
+  const days = Array.from(document.querySelectorAll('.'+prefix+'-copyday:checked')).map(el=>parseInt(el.value,10));
+  const repeat4 = document.getElementById(prefix+'-repeat4');
+  return { copyToWeekdays: days, repeatWeeks: (repeat4 && repeat4.checked) ? 4 : 0 };
+}
+
+async function assignSlot(dateISO, lot, slotId, start, end, employeeId, positionId, copy){
   try{
-    const res = await api('/api/shifts/slot-assign', { method:'POST', body: JSON.stringify({ date:dateISO, lot, slotId, start, end, employeeId }) });
+    const body = Object.assign({ date:dateISO, lot, slotId, start, end, employeeId, positionId }, copy||{});
+    const res = await api('/api/shifts/slot-assign', { method:'POST', body: JSON.stringify(body) });
     const idx = shifts.findIndex(s=>s.date===dateISO && s.lot===lot && s.slotId===slotId);
     if(idx>=0) shifts[idx] = res.shift; else shifts.push(res.shift);
+    if(res.copies) await refreshShifts();
   }catch(e){ loadError = e.message; }
   render();
 }
@@ -400,18 +456,6 @@ async function removeShiftAssignee(shiftId, employeeId){
   render();
 }
 
-function addAssigneeOptionsHtml(iso, excludeIds){
-  const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
-  let opts = '<option value="">+ Add staff…</option>';
-  sortedEmps.forEach(emp=>{
-    if(excludeIds.includes(emp.id)) return;
-    const st = (availability[emp.id] && availability[emp.id][iso]) || null;
-    if(st === 'unavailable') return;
-    opts += `<option value="${emp.id}">${emp.name}</option>`;
-  });
-  return opts;
-}
-
 async function publishWeek(){
   const weekStart = toISO(getWeekDates(weekOffset)[0]);
   try{
@@ -434,9 +478,55 @@ async function deleteShift(shiftId){
   try{
     await api(`/api/shifts/${shiftId}`, { method:'DELETE' });
     shifts = shifts.filter(s=>s.id!==shiftId);
-    editingShiftId = null;
+    scheduleEditor = null;
   }catch(e){ loadError = e.message; }
   render();
+}
+
+async function saveNewCustomEditor(){
+  const nameInput = document.getElementById('newCustomName');
+  const locSelect = document.getElementById('newCustomLocation');
+  const customLocInput = document.getElementById('newCustomCustomLocation');
+  const startInput = document.getElementById('newCustomStart');
+  const endInput = document.getElementById('newCustomEnd');
+  const posSel = document.getElementById('newCustomPosition');
+  const openCheckbox = document.getElementById('newCustomOpen');
+  if(!locSelect || !scheduleEditor) return;
+
+  let lot = locSelect.value;
+  if(lot === '__CUSTOM__'){
+    lot = (customLocInput ? customLocInput.value : '').trim();
+    if(!lot){ addShiftError = "Enter a name for the custom location."; render(); return; }
+  }
+  const { date, employeeId } = scheduleEditor;
+  const start = startInput.value || '09:00';
+  const end = endInput.value || '17:00';
+  const positionId = posSel.value || null;
+  const open = openCheckbox ? openCheckbox.checked : false;
+  const customName = nameInput ? nameInput.value.trim() : '';
+  const copy = readCopyOptions('newCustom');
+
+  try{
+    const res = await api('/api/shifts', { method:'POST', body: JSON.stringify({ date, lot, customName: customName || null, start, end, employeeId: employeeId || null, open, positionId, ...copy }) });
+    shifts.push(res.shift);
+    if(res.copies) await refreshShifts();
+    addShiftError = null;
+    scheduleEditor = null;
+  }catch(e){ addShiftError = e.message; }
+  render();
+}
+
+async function saveSlotEditor(){
+  if(!scheduleEditor) return;
+  const { date, lot, slotId, start, end } = scheduleEditor;
+  const empSel = document.getElementById('slotEditorEmployee');
+  const posSel = document.getElementById('slotEditorPosition');
+  const employeeId = empSel ? empSel.value : '';
+  const positionId = posSel ? (posSel.value || null) : null;
+  const copy = readCopyOptions('slotEditor');
+  scheduleEditor = null;
+  if(!employeeId) await clearSlot(date, lot, slotId);
+  else await assignSlot(date, lot, slotId, start, end, employeeId, positionId, copy);
 }
 
 function el(html){
@@ -854,6 +944,187 @@ function renderTimeOffAdmin(){
   return html;
 }
 
+// ---------- schedule grid (row per employee/Open Shifts, column per day) ----------
+function buildScheduleRows(dates, filterEmps){
+  const weekIso = dates.map(toISO);
+  const cells = {};
+  function pushBlock(key, iso, block){
+    const k = key+'|'+iso;
+    if(!cells[k]) cells[k] = [];
+    cells[k].push(block);
+  }
+
+  dates.forEach(d=>{
+    const iso = toISO(d);
+    Object.keys(DAILY_TEMPLATES).forEach(location=>{
+      DAILY_TEMPLATES[location].forEach(slot=>{
+        if(!slotApplies(slot, d)) return;
+        const s = shifts.find(x=>x.date===iso && x.lot===location && x.slotId===slot.id);
+        const ids = s ? getShiftEmployeeIds(s) : [];
+        const key = ids.length ? ids[0] : 'OPEN';
+        pushBlock(key, iso, {
+          kind:'slot', date: iso, lot: location, slotId: slot.id, start: slot.start, end: slot.end,
+          label: location+' — '+slot.label, shift: s||null, color: colorForShift(s)
+        });
+      });
+    });
+  });
+
+  shifts.filter(s=>!s.slotId && weekIso.includes(s.date)).forEach(s=>{
+    const ids = getShiftEmployeeIds(s);
+    const label = s.lot + (s.customName ? ' — '+s.customName : ' — Extra shift');
+    if(ids.length===0){
+      pushBlock('OPEN', s.date, { kind:'custom', date:s.date, shift:s, label, color: colorForShift(s) });
+    } else {
+      ids.forEach(id=> pushBlock(id, s.date, { kind:'custom', date:s.date, shift:s, label, color: colorForShift(s) }));
+    }
+  });
+
+  Object.keys(cells).forEach(k=>{
+    cells[k].sort((a,b)=>{
+      const as = a.kind==='slot' ? a.start : a.shift.start;
+      const bs = b.kind==='slot' ? b.start : b.shift.start;
+      return as.localeCompare(bs);
+    });
+  });
+
+  const rowKeys = [{key:'OPEN', label:'Open Shifts'}].concat(
+    filterEmps.map(e=>({key:e.id, label:e.name}))
+  );
+
+  return { cells, rowKeys };
+}
+
+function renderEmployeeGrid(dates, readOnly, filterEmps){
+  const { cells, rowKeys } = buildScheduleRows(dates, filterEmps);
+
+  let html = `<div class="schedgrid-wrap"><table class="schedgrid"><thead><tr><th class="schedgrid-namecol"></th>`;
+  dates.forEach(d=> html += `<th>${d.toLocaleDateString('en-US',{weekday:'short'})}<span class="sub">${fmtDayShort(d)}</span></th>`);
+  html += `</tr></thead><tbody>`;
+
+  rowKeys.forEach(row=>{
+    html += `<tr><td class="schedgrid-namecol${row.key==='OPEN'?' schedgrid-openrow':''}">${row.label}</td>`;
+    dates.forEach(d=>{
+      const iso = toISO(d);
+      const blocks = cells[row.key+'|'+iso] || [];
+      html += `<td class="schedgrid-cell">`;
+      blocks.forEach(b=>{
+        const timeStr = b.kind==='slot' ? `${fmt12(b.start)}–${fmt12(b.end)}` : `${fmt12(b.shift.start)}–${fmt12(b.shift.end)}`;
+        const draft = b.kind==='slot' ? (b.shift && b.shift.draft) : b.shift.draft;
+        const openTag = (b.kind==='custom' && b.shift.open && !getShiftEmployeeIds(b.shift).length) ? ' <span class="tag unset">OPEN</span>' : '';
+        const colorStyle = b.color ? `border-left-color:${b.color};background:${b.color}1A;` : '';
+        const action = readOnly ? '' : (b.kind==='slot'
+          ? `data-action="openslot" data-date="${b.date}" data-lot="${b.lot}" data-slotid="${b.slotId}" data-start="${b.start}" data-end="${b.end}"`
+          : `data-action="openshift" data-shiftid="${b.shift.id}"`);
+        html += `<div class="schedchip" ${action} style="${colorStyle}${readOnly?'':'cursor:pointer;'}">
+          <div class="schedchip-label">${b.label}${openTag}</div>
+          <div class="schedchip-time">${timeStr}${draft?' · Draft':''}</div>
+        </div>`;
+      });
+      if(!readOnly){
+        html += `<button class="schedgrid-add" data-action="opennewcustom" data-empid="${row.key==='OPEN'?'':row.key}" data-date="${iso}">+ Add</button>`;
+      }
+      html += `</td>`;
+    });
+    html += `</tr>`;
+  });
+
+  html += `</tbody></table></div>`;
+  return html;
+}
+
+function renderSlotEditor(ed){
+  const s = shifts.find(x=>x.date===ed.date && x.lot===ed.lot && x.slotId===ed.slotId);
+  const assignedId = s ? (getShiftEmployeeIds(s)[0]||'') : '';
+  const template = (DAILY_TEMPLATES[ed.lot]||[]).find(sl=>sl.id===ed.slotId);
+  const d = new Date(ed.date+'T00:00:00');
+  return `<div class="card">
+    <h2>${ed.lot} — ${template?template.label:''}</h2>
+    <p class="empty" style="padding:0 0 10px;">${fmtDayName(d)}, ${fmtDayShort(d)} · ${fmt12(ed.start)}–${fmt12(ed.end)}</p>
+    <label>Assign to</label>
+    <select id="slotEditorEmployee">${slotOptionsHtml(ed.date, assignedId)}</select>
+    <label style="margin-top:10px;">Position</label>
+    <select id="slotEditorPosition">${positionOptionsHtml(s?s.positionId:null)}</select>
+    ${renderCopyOptionsHtml('slotEditor')}
+    <div class="row" style="margin-top:12px;">
+      <button class="ghost" data-action="closeeditor" style="flex:1;">Cancel</button>
+      <button class="primary" data-action="saveslot" style="flex:1;">Save</button>
+    </div>
+  </div>`;
+}
+
+function renderShiftEditor(ed){
+  const s = shifts.find(x=>x.id===ed.shiftId);
+  if(!s) return '';
+  const d = new Date(s.date+'T00:00:00');
+  const ids = getShiftEmployeeIds(s);
+  const chipsInline = ids.map(id=>{
+    const e = employees.find(x=>x.id===id);
+    return `<span class="achip achip-sm">${e?e.name:'(removed)'} <button type="button" data-action="removeassignee" data-shiftid="${s.id}" data-empid="${id}">×</button></span>`;
+  }).join('');
+  return `<div class="card">
+    <h2>Edit shift</h2>
+    <p class="empty" style="padding:0 0 10px;">${s.lot} · ${fmtDayName(d)}, ${fmtDayShort(d)}</p>
+    <label>Shift name</label>
+    <input type="text" value="${s.customName||''}" placeholder="Optional" data-action="shifttime" data-field="customName" data-shiftid="${s.id}" />
+    <label style="margin-top:10px;">Time</label>
+    <div class="trow" style="display:flex;gap:8px;">
+      <input type="time" value="${s.start}" data-action="shifttime" data-field="start" data-shiftid="${s.id}" />
+      <input type="time" value="${s.end}" data-action="shifttime" data-field="end" data-shiftid="${s.id}" />
+    </div>
+    <label style="margin-top:10px;">Position</label>
+    <select data-action="shiftposition" data-shiftid="${s.id}">${positionOptionsHtml(s.positionId)}</select>
+    ${ids.length ? `<div class="assignedchips" style="margin-top:10px;">${chipsInline}</div>` : ''}
+    <label style="margin-top:10px;">${ids.length?'Add another':'Assign to'}</label>
+    <select data-action="addassignee" data-shiftid="${s.id}">${addAssigneeOptionsHtml(s.date, ids)}</select>
+    ${ids.length===0 ? `<div class="row" style="margin-top:10px;align-items:center;">
+      <input type="checkbox" data-action="toggleopen" data-shiftid="${s.id}" ${s.open?'checked':''} style="width:auto;" />
+      <label style="margin:0;">Open for pickup</label>
+    </div>` : ''}
+    <div class="row" style="margin-top:12px;">
+      <button class="ghost" data-action="closeeditor" style="flex:1;">Done</button>
+      <button class="danger" data-action="deleteshift" data-shiftid="${s.id}" style="flex:1;">Remove shift</button>
+    </div>
+  </div>`;
+}
+
+function renderNewCustomEditor(ed){
+  const d = new Date(ed.date+'T00:00:00');
+  const emp = ed.employeeId ? employees.find(e=>e.id===ed.employeeId) : null;
+  return `<div class="card">
+    <h2>Add shift${emp ? ' for '+emp.name : ''}</h2>
+    <p class="empty" style="padding:0 0 10px;">${fmtDayName(d)}, ${fmtDayShort(d)}</p>
+    <label>Shift name (optional)</label>
+    <input type="text" id="newCustomName" placeholder="e.g. UK Game Day Valet" />
+    <label style="margin-top:10px;">Location</label>
+    <select id="newCustomLocation">
+      ${Object.keys(DAILY_TEMPLATES).map(l=>`<option value="${l}">${l} (extra shift)</option>`).join('')}
+      ${LOTS.map(l=>`<option value="${l}">${l}</option>`).join('')}
+      <option value="Private Event">Private Event</option>
+      <option value="__CUSTOM__">Custom…</option>
+    </select>
+    <div id="newCustomLocationWrap" style="display:none;margin-top:8px;">
+      <input type="text" id="newCustomCustomLocation" placeholder="Type the location name" />
+    </div>
+    <label style="margin-top:10px;">Time</label>
+    <div class="trow" style="display:flex;gap:8px;">
+      <input type="time" id="newCustomStart" value="09:00" />
+      <input type="time" id="newCustomEnd" value="17:00" />
+    </div>
+    <label style="margin-top:10px;">Position</label>
+    <select id="newCustomPosition">${positionOptionsHtml(emp?emp.defaultPositionId:null)}</select>
+    ${!emp ? `<div class="row" style="margin-top:10px;align-items:center;">
+      <input type="checkbox" id="newCustomOpen" style="width:auto;" />
+      <label style="margin:0;" for="newCustomOpen">Post as open (any available staff can claim it)</label>
+    </div>` : ''}
+    ${renderCopyOptionsHtml('newCustom')}
+    <div class="row" style="margin-top:12px;">
+      <button class="ghost" data-action="closeeditor" style="flex:1;">Cancel</button>
+      <button class="primary" data-action="savenewcustom" style="flex:1;">Add shift</button>
+    </div>
+  </div>`;
+}
+
 function renderScheduleView(opts){
   const readOnly = !!(opts && opts.readOnly);
   const dates = getWeekDates(weekOffset);
@@ -869,56 +1140,33 @@ function renderScheduleView(opts){
     </div>
   </div>`;
 
+  let filterEmps;
+  if(readOnly){
+    filterEmps = employees.filter(e=>shifts.some(s=>s.date && weekIso.includes(s.date) && getShiftEmployeeIds(s).includes(e.id)))
+                           .sort((a,b)=>a.name.localeCompare(b.name));
+  } else {
+    html += '<div class="card"><h2>Lot</h2>';
+    html += `<select id="lotSelect">
+      <option value="__ALL__" ${managerLot==='__ALL__'?'selected':''}>All Lots</option>
+      ${LOTS.map(l=>`<option value="${l}" ${managerLot===l?'selected':''}>${l}</option>`).join('')}
+      <option value="Unassigned" ${managerLot==='Unassigned'?'selected':''}>Unassigned</option>
+    </select></div>`;
+    filterEmps = employees.filter(e => managerLot==='__ALL__' || e.lot===managerLot)
+                           .sort((a,b)=>a.name.localeCompare(b.name));
+  }
+
   html += `<div class="card" style="padding:12px 8px;">
     <h2 style="padding:0 8px;">This Week's Schedule</h2>
-    <p class="empty" style="padding:0 8px 6px;">Tony's + Dudley's fixed shifts, plus any events or church lots — all sorted by start time, per day.</p>
+    <p class="empty" style="padding:0 8px 6px;">Open Shifts up top, then one row per person. ${readOnly?'':'Click any shift to edit it, or "+ Add" to create one.'}</p>
   </div>`;
 
-  html += renderDailyColumns(dates, readOnly);
+  html += `<div class="card" style="padding:8px;">${renderEmployeeGrid(dates, readOnly, filterEmps)}</div>`;
 
   if(readOnly) return html;
 
   if(addShiftError){
     html += `<div class="err">${addShiftError}</div>`;
   }
-
-  html += `<div class="card">
-    <h2>Add a shift</h2>
-    <label>Shift name (optional)</label>
-    <input type="text" id="newShiftName" placeholder="e.g. UK Game Day Valet" />
-
-    <label style="margin-top:10px;">Location</label>
-    <select id="newShiftLocation">
-      ${Object.keys(DAILY_TEMPLATES).map(l=>`<option value="${l}">${l} (extra shift)</option>`).join('')}
-      ${LOTS.map(l=>`<option value="${l}">${l}</option>`).join('')}
-      <option value="Private Event">Private Event</option>
-      <option value="__CUSTOM__">Custom…</option>
-    </select>
-    <div id="newShiftCustomWrap" style="display:none;margin-top:8px;">
-      <input type="text" id="newShiftCustomLocation" placeholder="Type the location name" />
-    </div>
-
-    <label style="margin-top:10px;">Date</label>
-    <select id="newShiftDate">
-      ${dates.map(d=>`<option value="${toISO(d)}">${fmtDayName(d)}, ${fmtDayShort(d)}</option>`).join('')}
-    </select>
-
-    <label style="margin-top:10px;">Time</label>
-    <div class="trow" style="display:flex;gap:8px;">
-      <input type="time" id="newShiftStart" value="09:00" />
-      <input type="time" id="newShiftEnd" value="17:00" />
-    </div>
-
-    <label style="margin-top:10px;">Assign to (optional)</label>
-    <select id="newShiftAssign">${slotOptionsHtml(toISO(dates[0]), '')}</select>
-
-    <div class="row" style="margin-top:10px;align-items:center;">
-      <input type="checkbox" id="newShiftOpen" style="width:auto;" />
-      <label style="margin:0;" for="newShiftOpen">Leave unassigned and post as open (any available staff can claim it)</label>
-    </div>
-
-    <button class="primary" style="width:100%;margin-top:12px;" data-action="addcustomshift">Add shift</button>
-  </div>`;
 
   const draftCount = weekIso.reduce((n,iso)=> n + shifts.filter(s=>s.date===iso && s.draft).length, 0);
   html += `<div class="card">
@@ -928,113 +1176,16 @@ function renderScheduleView(opts){
     <button class="primary" style="width:100%;margin-top:10px;" data-action="publishweek" ${draftCount===0?'disabled':''}>Publish week</button>
   </div>`;
 
-  if(editingShiftId){
-    const found = findShift(editingShiftId);
-    if(found){
-      const d = new Date(found.dateISO+'T00:00:00');
-      const isUnfilled = getShiftEmployeeIds(found.shift).length===0;
-      html += `<div class="card">
-        <h2>Edit shift</h2>
-        <p class="empty" style="padding:0 0 10px;">${found.shift.lot} · ${fmtDayName(d)}, ${fmtDayShort(d)}</p>
-        <div class="shiftedit" style="padding:0;border:none;">
-          <label>Shift name</label>
-          <input type="text" value="${found.shift.customName||''}" placeholder="Optional" data-action="shifttime" data-field="customName" data-shiftid="${found.shift.id}" />
-          <label style="margin-top:10px;">Time</label>
-          <div class="trow">
-            <input type="time" value="${found.shift.start}" data-action="shifttime" data-field="start" data-shiftid="${found.shift.id}" />
-            <input type="time" value="${found.shift.end}" data-action="shifttime" data-field="end" data-shiftid="${found.shift.id}" />
-          </div>
-          ${isUnfilled ? `<div class="row" style="margin-top:10px;align-items:center;">
-            <input type="checkbox" id="editShiftOpen" style="width:auto;" data-action="toggleopen" data-shiftid="${found.shift.id}" ${found.shift.open?'checked':''} />
-            <label style="margin:0;" for="editShiftOpen">Open for pickup</label>
-          </div>` : ''}
-          <div class="actions">
-            <button class="ghost" data-action="closeedit">Done</button>
-            <button class="danger" data-action="deleteshift" data-shiftid="${found.shift.id}">Remove shift</button>
-          </div>
-        </div>
-      </div>`;
-    } else {
-      editingShiftId = null;
+  if(scheduleEditor){
+    if(scheduleEditor.type==='slot') html += renderSlotEditor(scheduleEditor);
+    else if(scheduleEditor.type==='shift'){
+      const editorHtml = renderShiftEditor(scheduleEditor);
+      if(editorHtml) html += editorHtml; else scheduleEditor = null;
     }
+    else if(scheduleEditor.type==='newcustom') html += renderNewCustomEditor(scheduleEditor);
   }
 
   return html;
-}
-
-function slotOptionsHtml(iso, assignedId){
-  const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
-  let options = `<option value="">— Open —</option>`;
-  sortedEmps.forEach(emp=>{
-    const st = (availability[emp.id] && availability[emp.id][iso]) || null;
-    if(st === 'unavailable' && emp.id !== assignedId) return;
-    let label = emp.name;
-    if(st === 'unavailable') label += ' (unavailable)';
-    options += `<option value="${emp.id}" ${emp.id===assignedId?'selected':''}>${label}</option>`;
-  });
-  return options;
-}
-
-function renderDailyColumns(dates, readOnly){
-  const locationClass = { "Tony's":"tonys", "Dudley's":"dudleys" };
-
-  const columns = dates.map(d=>{
-    const iso = toISO(d);
-    const rows = [];
-    Object.keys(DAILY_TEMPLATES).forEach(location=>{
-      DAILY_TEMPLATES[location].forEach(slot=>{
-        if(!slotApplies(slot, d)) return;
-        rows.push({type:'template', location, slot, start:slot.start});
-      });
-    });
-    shifts.filter(s=>s.date===iso && !s.slotId).forEach(s=>{
-      rows.push({type:'custom', location:s.lot, shift:s, start:s.start});
-    });
-    rows.sort((a,b)=> a.start.localeCompare(b.start));
-
-    const rowsHtml = rows.map(row=>{
-      if(row.type==='template'){
-        const { location, slot } = row;
-        const s = shifts.find(x=>x.date===iso && x.lot===location && x.slotId===slot.id);
-        const assignedId = s ? (getShiftEmployeeIds(s)[0] || '') : '';
-        const assignedEmp = assignedId ? employees.find(e=>e.id===assignedId) : null;
-        return `<div class="slotrow ${locationClass[location]||''}">
-          <div class="slabel">${location} — ${slot.label}</div>
-          <div class="stime3">${fmt12(slot.start)}–${fmt12(slot.end)}</div>
-          ${readOnly
-            ? `<div class="empty" style="padding:2px 0 0;">${assignedEmp ? assignedEmp.name : 'Unfilled'}</div>`
-            : `<select class="slotselect ${s&&s.draft?'draft':''}" data-action="slotassign" data-date="${iso}" data-lot="${location}" data-slotid="${slot.id}" data-start="${slot.start}" data-end="${slot.end}">
-                ${slotOptionsHtml(iso, assignedId)}
-              </select>`}
-        </div>`;
-      } else {
-        const s = row.shift;
-        const ids = getShiftEmployeeIds(s);
-        const names = ids.map(id=>{ const e = employees.find(x=>x.id===id); return e?e.name:'(removed)'; });
-        const chipsInline = ids.map(id=>{
-          const e = employees.find(x=>x.id===id);
-          return `<span class="achip achip-sm">${e?e.name:'(removed)'} <button type="button" data-action="removeassignee" data-shiftid="${s.id}" data-empid="${id}">×</button></span>`;
-        }).join('');
-        return `<div class="slotrow ${locationClass[row.location]||''}">
-          <div class="slabel" ${readOnly?'':`data-action="editshift" data-shiftid="${s.id}" style="cursor:pointer;"`}>${row.location}${s.customName? ' — '+s.customName : ' — Extra shift'}${s.open && !ids.length ? ' <span class="tag unset">OPEN</span>' : ''}</div>
-          <div class="stime3">${fmt12(s.start)}–${fmt12(s.end)}${s.draft?' · Draft':''}</div>
-          ${readOnly
-            ? `<div class="empty" style="padding:2px 0 0;">${names.length ? names.join(', ') : (s.open ? 'Open for pickup' : 'Unfilled')}</div>`
-            : `${chipsInline ? `<div class="assignedchips" style="margin-bottom:6px;">${chipsInline}</div>` : ''}
-              <select class="slotselect" data-action="addassignee" data-shiftid="${s.id}">
-                ${addAssigneeOptionsHtml(iso, ids)}
-              </select>`}
-        </div>`;
-      }
-    }).join('');
-
-    return `<div class="daycolumn">
-      <div class="daycolumn-head">${d.toLocaleDateString('en-US',{weekday:'short'})}<span class="sub">${fmtDayShort(d)}</span></div>
-      <div class="daycolumn-body">${rowsHtml || '<p class="empty" style="padding:4px 0;">Nothing scheduled here</p>'}</div>
-    </div>`;
-  }).join('');
-
-  return `<div class="dailycolumns">${columns}</div>`;
 }
 
 function renderManagerView(){
@@ -1050,6 +1201,28 @@ function renderManagerView(){
     <h2>Import roster</h2>
     <p class="empty" style="padding:0 0 10px;">Adds all active QuickBooks employees to the list below, tagged "Unassigned" until you sort them into lots. Safe to tap more than once — names already on the list are skipped.</p>
     <button class="primary" style="width:100%;" data-action="importroster">Import roster</button>
+  </div>`;
+
+  if(positionError) html += `<div class="err">${positionError}</div>`;
+  html += `<div class="card">
+    <h2>Positions</h2>
+    <p class="empty" style="padding:0 0 10px;">Color-coded roles you can tag onto any shift — shows up as a colored accent on the schedule.</p>
+    ${positions.length ? positions.map(p=>`
+      <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+        <span class="row" style="gap:8px;"><span style="width:14px;height:14px;border-radius:50%;background:${p.color};display:inline-block;"></span>${p.name}</span>
+        <button class="danger" data-action="removeposition" data-id="${p.id}">Remove</button>
+      </div>
+    `).join('') : '<p class="empty" style="padding:0 0 10px;">No positions yet.</p>'}
+    <label style="margin-top:12px;">New position name</label>
+    <input type="text" id="newPositionName" placeholder="e.g. Runner" />
+    <label style="margin-top:10px;">Color</label>
+    <div class="row" style="flex-wrap:wrap;gap:8px;">
+      ${POSITION_COLORS.map((c,i)=>`<label style="cursor:pointer;">
+        <input type="radio" name="newPositionColor" value="${c}" ${i===0?'checked':''} style="display:none;" />
+        <span style="width:24px;height:24px;border-radius:50%;background:${c};display:inline-block;border:2px solid transparent;" class="colorswatch" data-color="${c}"></span>
+      </label>`).join('')}
+    </div>
+    <button class="primary" style="width:100%;margin-top:12px;" data-action="addposition">Add position</button>
   </div>`;
 
   html += '<div class="card"><h2>Lot</h2>';
@@ -1132,6 +1305,7 @@ function renderStaffDirectory(emps){
           <select data-action="staffedit" data-id="${emp.id}" data-field="lot">
             ${EMP_HOME_TAGS.map(l=>`<option value="${l}" ${emp.lot===l?'selected':''}>${l}</option>`).join('')}
           </select>
+          <select data-action="staffedit" data-id="${emp.id}" data-field="defaultPositionId">${positionOptionsHtml(emp.defaultPositionId)}</select>
         </div>
         <div class="staffcard-status">${emp.onboarded ? 'Signed up' : 'Not signed up yet'}</div>
       </div>
@@ -1153,7 +1327,7 @@ function bindEvents(){
 
   app.querySelectorAll('[data-action="setauthview"]').forEach(b=> b.onclick = ()=>{ authView = b.dataset.view; render(); });
   app.querySelectorAll('[data-action="setstafftab"]').forEach(b=> b.onclick = ()=>{ staffTab = b.dataset.tab; openDayKey=null; render(); });
-  app.querySelectorAll('[data-action="setadmintab"]').forEach(b=> b.onclick = ()=>{ adminTab = b.dataset.tab; openDayKey=null; render(); });
+  app.querySelectorAll('[data-action="setadmintab"]').forEach(b=> b.onclick = ()=>{ adminTab = b.dataset.tab; openDayKey=null; scheduleEditor=null; render(); });
 
   const loginBtn = app.querySelector('#loginBtn');
   if(loginBtn) loginBtn.onclick = ()=>{
@@ -1215,42 +1389,48 @@ function bindEvents(){
   app.querySelectorAll('[data-action="denypto"]').forEach(b=> b.onclick = ()=> denyPto(b.dataset.id));
 
   const lotSelect = app.querySelector('#lotSelect');
-  if(lotSelect) lotSelect.onchange = ()=>{ managerLot = lotSelect.value; openDayKey=null; render(); };
+  if(lotSelect) lotSelect.onchange = ()=>{ managerLot = lotSelect.value; openDayKey=null; scheduleEditor=null; render(); };
 
   app.querySelectorAll('[data-action="importroster"]').forEach(b=> b.onclick = ()=> importRoster());
 
-  app.querySelectorAll('[data-action="publishweek"]').forEach(b=> b.onclick = ()=> publishWeek());
-  app.querySelectorAll('[data-action="slotassign"]').forEach(sel=> sel.onchange = ()=>{
-    const { date, lot, slotid, start, end } = sel.dataset;
-    if(sel.value){
-      assignSlot(date, lot, slotid, start, end, sel.value);
-    } else {
-      clearSlot(date, lot, slotid);
-    }
+  app.querySelectorAll('[data-action="addposition"]').forEach(b=> b.onclick = ()=> addPosition());
+  app.querySelectorAll('[data-action="removeposition"]').forEach(b=> b.onclick = ()=> removePosition(b.dataset.id));
+  app.querySelectorAll('input[name="newPositionColor"]').forEach(radio=>{
+    const sync = ()=>{
+      app.querySelectorAll('.colorswatch').forEach(sw=>{
+        const r = app.querySelector(`input[name="newPositionColor"][value="${sw.dataset.color}"]`);
+        sw.style.borderColor = (r && r.checked) ? 'var(--ink)' : 'transparent';
+      });
+    };
+    radio.onchange = sync;
+    if(radio.checked) sync();
   });
 
-  const newShiftLocation = app.querySelector('#newShiftLocation');
-  if(newShiftLocation) newShiftLocation.onchange = ()=>{
-    const wrap = app.querySelector('#newShiftCustomWrap');
-    if(wrap) wrap.style.display = newShiftLocation.value === '__CUSTOM__' ? 'block' : 'none';
-  };
-  const newShiftDate = app.querySelector('#newShiftDate');
-  if(newShiftDate) newShiftDate.onchange = ()=>{
-    const assignSelect = app.querySelector('#newShiftAssign');
-    if(assignSelect) assignSelect.innerHTML = slotOptionsHtml(newShiftDate.value, '');
-  };
-  const newShiftOpen = app.querySelector('#newShiftOpen');
-  if(newShiftOpen) newShiftOpen.onchange = ()=>{
-    const assignSelect = app.querySelector('#newShiftAssign');
-    if(assignSelect) assignSelect.disabled = newShiftOpen.checked;
-  };
-  app.querySelectorAll('[data-action="addcustomshift"]').forEach(b=> b.onclick = ()=> submitCustomShift());
+  app.querySelectorAll('[data-action="publishweek"]').forEach(b=> b.onclick = ()=> publishWeek());
 
-  app.querySelectorAll('[data-action="editshift"]').forEach(b=> b.onclick = ()=>{
-    editingShiftId = (editingShiftId===b.dataset.shiftid) ? null : b.dataset.shiftid;
+  // schedule grid interactions
+  app.querySelectorAll('[data-action="openslot"]').forEach(el=> el.onclick = ()=>{
+    scheduleEditor = { type:'slot', date:el.dataset.date, lot:el.dataset.lot, slotId:el.dataset.slotid, start:el.dataset.start, end:el.dataset.end };
     render();
   });
-  app.querySelectorAll('[data-action="closeedit"]').forEach(b=> b.onclick = ()=>{ editingShiftId = null; render(); });
+  app.querySelectorAll('[data-action="openshift"]').forEach(el=> el.onclick = ()=>{
+    scheduleEditor = { type:'shift', shiftId: el.dataset.shiftid };
+    render();
+  });
+  app.querySelectorAll('[data-action="opennewcustom"]').forEach(el=> el.onclick = ()=>{
+    scheduleEditor = { type:'newcustom', employeeId: el.dataset.empid || null, date: el.dataset.date };
+    render();
+  });
+  app.querySelectorAll('[data-action="closeeditor"]').forEach(b=> b.onclick = ()=>{ scheduleEditor = null; addShiftError = null; render(); });
+  app.querySelectorAll('[data-action="saveslot"]').forEach(b=> b.onclick = ()=> saveSlotEditor());
+  app.querySelectorAll('[data-action="savenewcustom"]').forEach(b=> b.onclick = ()=> saveNewCustomEditor());
+
+  const newCustomLocation = app.querySelector('#newCustomLocation');
+  if(newCustomLocation) newCustomLocation.onchange = ()=>{
+    const wrap = app.querySelector('#newCustomLocationWrap');
+    if(wrap) wrap.style.display = newCustomLocation.value === '__CUSTOM__' ? 'block' : 'none';
+  };
+
   app.querySelectorAll('[data-action="deleteshift"]').forEach(b=> b.onclick = ()=>{
     deleteShift(b.dataset.shiftid);
   });
@@ -1258,6 +1438,9 @@ function bindEvents(){
     let val = inp.value;
     if(inp.dataset.field==='customName' && val.trim()==='') val = null;
     updateShift(inp.dataset.shiftid, inp.dataset.field, val);
+  });
+  app.querySelectorAll('[data-action="shiftposition"]').forEach(sel=> sel.onchange = ()=>{
+    updateShift(sel.dataset.shiftid, 'positionId', sel.value || null);
   });
   app.querySelectorAll('[data-action="toggleopen"]').forEach(inp=> inp.onchange = ()=>{
     updateShift(inp.dataset.shiftid, 'open', inp.checked);
@@ -1273,6 +1456,7 @@ function bindEvents(){
   app.querySelectorAll('[data-action="week"]').forEach(b=> b.onclick = ()=>{
     weekOffset += parseInt(b.dataset.dir,10);
     openDayKey = null;
+    scheduleEditor = null;
     render();
   });
 

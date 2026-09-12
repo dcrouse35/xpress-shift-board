@@ -48,7 +48,14 @@
     return slot.days.includes(day);
   }
 
-  const constants = { LOTS, EMP_HOME_TAGS, DEFAULT_ROSTER, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies };
+  // Fixed palette for position tags — pick-from-list keeps the UI simple
+  // instead of a full color picker.
+  const POSITION_COLORS = [
+    "#FE5F00", "#2F6FED", "#12915B", "#C87A0A", "#E0402F",
+    "#7C3AED", "#0EA5A0", "#DB2777", "#4B5563", "#B45309"
+  ];
+
+  const constants = { LOTS, EMP_HOME_TAGS, DEFAULT_ROSTER, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = constants;

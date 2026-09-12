@@ -167,33 +167,39 @@ button.danger{
   padding:10px;font-weight:700;font-size:13px;cursor:pointer;font-family:var(--font);
 }
 
-/* daily schedule: a real grid on wide screens (all 7 days visible, no side-scroll),
-   stacked full-width sections on narrow screens (also no side-scroll — just scroll down) */
-.dailycolumns{
-  display:flex;flex-direction:column;gap:12px;margin-bottom:16px;
+/* schedule grid: one row per employee (plus Open Shifts), one column per day.
+   Horizontal scroll is a deliberate fallback on narrow screens (there's no way
+   to fit 7 real columns on a phone) — the name column stays pinned via
+   position:sticky so you always know which row you're looking at. */
+.schedgrid-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.schedgrid{border-collapse:collapse;width:100%;table-layout:auto;}
+.schedgrid th, .schedgrid td{border:1px solid var(--line);vertical-align:top;}
+.schedgrid thead th{
+  background:var(--bg);font-size:10.5px;font-weight:800;color:var(--ink-muted);
+  text-transform:uppercase;letter-spacing:.02em;padding:8px 6px;text-align:center;white-space:nowrap;
 }
-.daycolumn{
-  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-md);
-  overflow:hidden;box-shadow:var(--shadow);
+.schedgrid thead th .sub{display:block;font-weight:600;text-transform:none;letter-spacing:0;margin-top:1px;}
+.schedgrid-namecol{
+  position:sticky;left:0;z-index:1;background:var(--surface);
+  font-weight:700;font-size:12.5px;color:var(--ink);padding:8px 10px;white-space:nowrap;text-align:left;
+  min-width:120px;
 }
-.daycolumn-head{
-  background:var(--bg);padding:10px 12px;font-weight:800;font-size:13.5px;text-align:left;
-  border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:8px;
+.schedgrid-namecol.schedgrid-openrow{color:var(--brand-dark);background:var(--brand-bg);}
+.schedgrid-cell{padding:5px;min-width:118px;}
+.schedchip{
+  border-left:4px solid var(--line-strong);background:var(--bg);border-radius:7px;
+  padding:6px 7px;margin-bottom:5px;
 }
-.daycolumn-head .sub{font-weight:600;color:var(--ink-muted);font-size:11px;}
-.daycolumn-body{padding:9px;display:flex;flex-direction:column;gap:8px;}
-
-@media (min-width:900px){
-  .dailycolumns{ display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:8px; align-items:start; }
-  .daycolumn-head{ flex-direction:column;align-items:flex-start;gap:1px; }
+.schedchip:last-child{margin-bottom:0;}
+.schedchip-label{font-size:10.5px;font-weight:800;color:var(--ink);line-height:1.3;}
+.schedchip-time{font-size:9.5px;color:var(--ink-muted);font-weight:600;margin-top:1px;}
+.schedgrid-add{
+  width:100%;background:transparent;border:1.5px dashed var(--line-strong);border-radius:7px;
+  padding:5px;font-size:10.5px;font-weight:700;color:var(--ink-muted);cursor:pointer;font-family:var(--font);
+  margin-top:2px;
 }
-
-.slotrow{border-left:4px solid var(--line-strong);background:var(--bg);border-radius:8px;padding:7px 8px;}
-.slotrow.tonys{border-left-color:var(--brand);background:var(--brand-bg);}
-.slotrow.dudleys{border-left-color:var(--dudleys);background:var(--dudleys-bg);}
-.slotrow .slabel{font-size:10.5px;font-weight:800;color:var(--ink);line-height:1.3;}
-.slotrow .stime3{font-size:9.5px;color:var(--ink-muted);font-weight:600;margin:1px 0 5px;}
-.slotrow select.slotselect{width:100%;}
+.schedgrid-add:hover{border-color:var(--brand);color:var(--brand-dark);}
+.colorswatch{transition:border-color .1s;}
 
 .assignedchips{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px;}
 .achip{

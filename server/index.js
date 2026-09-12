@@ -6,7 +6,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 
 const db = require('./db');
-const { LOTS, DEFAULT_ROSTER } = require('../shared/constants');
+const { LOTS, DEFAULT_ROSTER, POSITION_COLORS, DAILY_TEMPLATES, slotApplies } = require('../shared/constants');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -106,6 +106,26 @@ function weekDatesFrom(weekStartISO) {
   const out = [];
   for (let i = 0; i < 7; i++) { const d = new Date(start); d.setDate(start.getDate() + i); out.push(d); }
   return out;
+}
+
+// Given a base date and a set of target JS weekdays (0=Sun..6=Sat), returns
+// the ISO dates for those weekdays in the base date's own week — plus, if
+// repeatWeeks > 0, the same set again for each of the following weeks.
+// Used by "copy this shift to other days / future weeks". Capped for sanity.
+function expandCopyDates(baseDateISO, weekdays, repeatWeeks) {
+  const cappedWeeks = Math.max(0, Math.min(8, repeatWeeks || 0));
+  const monday = mondayOf(new Date(baseDateISO + 'T00:00:00'));
+  const out = [];
+  for (let w = 0; w <= cappedWeeks; w++) {
+    (weekdays || []).forEach(jsDay => {
+      const offset = (jsDay === 0 ? 6 : jsDay - 1) + w * 7;
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + offset);
+      const iso = toISO(d);
+      if (iso !== baseDateISO) out.push(iso);
+    });
+  }
+  return [...new Set(out)].slice(0, 60);
 }
 
 // ---------- auth ----------
@@ -228,7 +248,7 @@ app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
 app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   const emp = db.data.employees.find(e => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found.' });
-  const { name, email, phone, lot } = req.body || {};
+  const { name, email, phone, lot, defaultPositionId } = req.body || {};
   if (name !== undefined) {
     if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
     emp.name = name.trim();
@@ -236,6 +256,7 @@ app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   if (email !== undefined) emp.email = email.trim();
   if (phone !== undefined) emp.phone = phone.trim();
   if (lot !== undefined) emp.lot = lot;
+  if (defaultPositionId !== undefined) emp.defaultPositionId = defaultPositionId || null;
   db.persist();
   res.json({ employee: publicEmployee(emp) });
 });
@@ -266,6 +287,43 @@ app.post('/api/employees/import', requireAdmin, (req, res) => {
   res.json({ added, skipped: DEFAULT_ROSTER.length - added });
 });
 
+// ---------- positions ----------
+app.get('/api/positions', requireAnyAuth, (req, res) => {
+  res.json({ positions: db.data.positions });
+});
+
+app.post('/api/positions', requireAdmin, (req, res) => {
+  let { name, color } = req.body || {};
+  name = (name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Enter a position name.' });
+  if (!POSITION_COLORS.includes(color)) color = POSITION_COLORS[0];
+  const position = { id: uid('pos'), name, color };
+  db.data.positions.push(position);
+  db.persist();
+  res.json({ position });
+});
+
+app.patch('/api/positions/:id', requireAdmin, (req, res) => {
+  const position = db.data.positions.find(p => p.id === req.params.id);
+  if (!position) return res.status(404).json({ error: 'Position not found.' });
+  const { name, color } = req.body || {};
+  if (name !== undefined) {
+    if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
+    position.name = name.trim();
+  }
+  if (color !== undefined && POSITION_COLORS.includes(color)) position.color = color;
+  db.persist();
+  res.json({ position });
+});
+
+app.delete('/api/positions/:id', requireAdmin, (req, res) => {
+  db.data.positions = db.data.positions.filter(p => p.id !== req.params.id);
+  db.data.shifts.forEach(s => { if (s.positionId === req.params.id) delete s.positionId; });
+  db.data.employees.forEach(e => { if (e.defaultPositionId === req.params.id) delete e.defaultPositionId; });
+  db.persist();
+  res.json({ ok: true });
+});
+
 // ---------- availability ----------
 app.get('/api/availability', requireAnyAuth, (req, res) => {
   res.json({ availability: db.data.availability });
@@ -292,34 +350,47 @@ app.get('/api/shifts', requireAnyAuth, (req, res) => {
 });
 
 app.post('/api/shifts', requireAdmin, (req, res) => {
-  const { date, lot, customName, start, end, employeeId, open } = req.body || {};
+  const { date, lot, customName, start, end, employeeId, open, positionId, copyToWeekdays, repeatWeeks } = req.body || {};
   if (!date || !lot) return res.status(400).json({ error: 'Missing date or location.' });
-  const shift = {
-    id: uid('s'), date, lot,
+  const makeShift = (d) => ({
+    id: uid('s'), date: d, lot,
     customName: customName || null,
     start: start || '09:00', end: end || '17:00',
     employeeIds: employeeId ? [employeeId] : [],
     open: !employeeId && !!open,
+    positionId: positionId || null,
     draft: false
-  };
+  });
+  const shift = makeShift(date);
   db.data.shifts.push(shift);
+  const extraDates = expandCopyDates(date, copyToWeekdays, repeatWeeks);
+  extraDates.forEach(d => db.data.shifts.push(makeShift(d)));
   db.persist();
-  res.json({ shift });
+  res.json({ shift, copies: extraDates.length });
 });
 
 app.post('/api/shifts/slot-assign', requireAdmin, (req, res) => {
-  const { date, lot, slotId, start, end, employeeId } = req.body || {};
+  const { date, lot, slotId, start, end, employeeId, positionId, copyToWeekdays, repeatWeeks } = req.body || {};
   if (!date || !lot || !slotId) return res.status(400).json({ error: 'Missing fields.' });
-  let shift = db.data.shifts.find(s => s.date === date && s.lot === lot && s.slotId === slotId);
-  if (shift) {
-    shift.employeeIds = [employeeId];
-    shift.draft = true;
-  } else {
-    shift = { id: uid('s'), date, lot, slotId, start, end, employeeIds: [employeeId], draft: true };
-    db.data.shifts.push(shift);
-  }
+  const upsertFor = (d) => {
+    let s = db.data.shifts.find(x => x.date === d && x.lot === lot && x.slotId === slotId);
+    if (s) {
+      s.employeeIds = [employeeId];
+      if (positionId !== undefined) s.positionId = positionId || null;
+      s.draft = true;
+    } else {
+      s = { id: uid('s'), date: d, lot, slotId, start, end, employeeIds: [employeeId], positionId: positionId || null, draft: true };
+      db.data.shifts.push(s);
+    }
+    return s;
+  };
+  const shift = upsertFor(date);
+  const slotDef = (DAILY_TEMPLATES[lot] || []).find(sl => sl.id === slotId);
+  let extraDates = expandCopyDates(date, copyToWeekdays, repeatWeeks);
+  if (slotDef) extraDates = extraDates.filter(d => slotApplies(slotDef, new Date(d + 'T00:00:00')));
+  extraDates.forEach(d => upsertFor(d));
   db.persist();
-  res.json({ shift });
+  res.json({ shift, copies: extraDates.length });
 });
 
 app.delete('/api/shifts/slot', requireAdmin, (req, res) => {
@@ -332,11 +403,12 @@ app.delete('/api/shifts/slot', requireAdmin, (req, res) => {
 app.patch('/api/shifts/:id', requireAdmin, (req, res) => {
   const shift = findShift(req.params.id);
   if (!shift) return res.status(404).json({ error: 'Shift not found.' });
-  const { start, end, customName, open } = req.body || {};
+  const { start, end, customName, open, positionId } = req.body || {};
   if (start !== undefined) shift.start = start;
   if (end !== undefined) shift.end = end;
   if (customName !== undefined) shift.customName = customName || null;
   if (open !== undefined) shift.open = !!open;
+  if (positionId !== undefined) shift.positionId = positionId || null;
   shift.draft = true;
   db.persist();
   res.json({ shift });
