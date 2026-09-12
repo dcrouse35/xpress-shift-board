@@ -905,10 +905,12 @@ app.get('/api/timesheets', requireScheduler, (req, res) => {
   res.json({ entries });
 });
 
-// A CSV laid out exactly like QuickBooks Time's own entry fields (Customer,
-// Location, Payroll Item) so entering it there is fast copy/paste instead
-// of manual lookups — there's no bulk-import feature in QuickBooks Time
-// itself to target, so this is the practical alternative.
+// Matches QuickBooks Time's own "Manual time Import" feature (Feature
+// Add-ons > Manual time Import) exactly — verified against the real account
+// in Test Mode: username is the person's email, jobcode is the Customer
+// name (or "Parent => Child" path for a sub-customer), date is MM/DD/YYYY,
+// and "location"/"payroll item" are that account's actual custom field
+// names (lowercase, confirmed in Custom Fields settings).
 function qbRateFor(lot, positionId) {
   let match = db.data.payRates.find(r => r.lot === lot && r.positionId === positionId);
   if (!match) match = db.data.payRates.find(r => r.lot === lot && !r.positionId);
@@ -918,40 +920,69 @@ function csvField(value) {
   const s = String(value == null ? '' : value);
   return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
+function toMMDDYYYY(iso) {
+  const [y, m, d] = iso.split('-');
+  return `${m}/${d}/${y}`;
+}
 
-app.get('/api/timesheets/qb-export', requireScheduler, (req, res) => {
-  const weekStart = req.query.weekStart;
-  if (!weekStart) return res.status(400).json({ error: 'Missing weekStart.' });
+// Shared by both endpoints below: resolves each time entry to either a
+// clean, importable row or a reason it can't be (missing email, no shift
+// that day, or more than one — a required jobcode can't be guessed on
+// something that feeds payroll).
+function resolveTimesheetRows(weekStart) {
   const isoSet = new Set(weekDatesFrom(weekStart).map(toISO));
   const entries = db.data.timeEntries.filter(t => isoSet.has(t.date));
+  const clean = [];
+  const needsReview = [];
 
-  const rows = [['Employee', 'Date', 'Customer', 'Location', 'Payroll Item', 'Hours', 'Notes']];
   entries.forEach(t => {
     const emp = db.data.employees.find(e => e.id === t.employeeId);
     const empName = emp ? emp.name : '(removed)';
     const end = t.clockOut ? new Date(t.clockOut).getTime() : Date.now();
     const hours = (end - new Date(t.clockIn).getTime()) / 3600000;
 
-    const matchingShifts = db.data.shifts.filter(s => s.date === t.date && (s.employeeIds || []).includes(t.employeeId));
-    let customer = '', location = '', payrollItem = '', notes = '';
-    if (matchingShifts.length === 1) {
-      const shift = matchingShifts[0];
-      location = shift.lot;
-      customer = db.data.qbCustomerOverrides[shift.lot] || shift.lot;
-      const rate = qbRateFor(shift.lot, shift.positionId || null);
-      payrollItem = (rate && rate.qbPayrollItem) || 'Regular Pay';
-    } else if (matchingShifts.length === 0) {
-      notes = 'No matching shift — fill in manually';
-    } else {
-      notes = 'Multiple shifts that day — fill in manually';
+    if (!emp || !emp.email) {
+      needsReview.push({ employee: empName, date: t.date, reason: 'No email on file (needed as the QuickBooks username)' });
+      return;
     }
+    const matchingShifts = db.data.shifts.filter(s => s.date === t.date && (s.employeeIds || []).includes(t.employeeId));
+    if (matchingShifts.length !== 1) {
+      needsReview.push({
+        employee: empName, date: t.date,
+        reason: matchingShifts.length === 0 ? 'No matching shift that day' : 'Multiple shifts that day'
+      });
+      return;
+    }
+    const shift = matchingShifts[0];
+    const jobcode = db.data.qbCustomerOverrides[shift.lot] || shift.lot;
+    const rate = qbRateFor(shift.lot, shift.positionId || null);
+    const payrollItem = (rate && rate.qbPayrollItem) || 'Regular Pay';
+    clean.push({ username: emp.email, date: t.date, jobcode, hours, location: shift.lot, payrollItem });
+  });
 
-    rows.push([empName, t.date, customer, location, payrollItem, hours.toFixed(2), notes]);
+  return { clean, needsReview };
+}
+
+app.get('/api/timesheets/qb-review', requireScheduler, (req, res) => {
+  const weekStart = req.query.weekStart;
+  if (!weekStart) return res.status(400).json({ error: 'Missing weekStart.' });
+  const { needsReview } = resolveTimesheetRows(weekStart);
+  res.json({ needsReview });
+});
+
+app.get('/api/timesheets/qb-export', requireScheduler, (req, res) => {
+  const weekStart = req.query.weekStart;
+  if (!weekStart) return res.status(400).json({ error: 'Missing weekStart.' });
+  const { clean } = resolveTimesheetRows(weekStart);
+
+  const rows = [['username', 'date', 'jobcode', 'hours', 'notes', 'custom field name', 'custom field value', 'custom field name', 'custom field value']];
+  clean.forEach(r => {
+    rows.push([r.username, toMMDDYYYY(r.date), r.jobcode, r.hours.toFixed(2), '', 'location', r.location, 'payroll item', r.payrollItem]);
   });
 
   const csv = rows.map(r => r.map(csvField).join(',')).join('\r\n');
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="timesheet-${weekStart}.csv"`);
+  res.setHeader('Content-Disposition', `attachment; filename="quickbooks-time-import-${weekStart}.csv"`);
   res.send(csv);
 });
 

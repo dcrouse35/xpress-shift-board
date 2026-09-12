@@ -51,6 +51,7 @@ function payRateFor(lot, positionId){
 
 let shiftTemplates = []; // [ {id, label, start, end} ]
 let timeEntries = []; // [ {id, employeeId, date, clockIn, clockOut} ] — current timesheets week
+let qbNeedsReview = []; // [ {employee, date, reason} ] — timesheet entries the QuickBooks export can't resolve on its own
 let clockStatus = null; // staff's own open time-clock entry, or null
 
 let me = null;    // logged-in staff identity (sanitized), or null
@@ -191,8 +192,12 @@ async function refreshShifts(){
 
 async function loadTimesheets(){
   const weekStart = toISO(getWeekDates(weekOffset)[0]);
-  const res = await api('/api/timesheets?weekStart=' + encodeURIComponent(weekStart));
+  const [res, reviewRes] = await Promise.all([
+    api('/api/timesheets?weekStart=' + encodeURIComponent(weekStart)),
+    api('/api/timesheets/qb-review?weekStart=' + encodeURIComponent(weekStart))
+  ]);
   timeEntries = res.entries;
+  qbNeedsReview = reviewRes.needsReview;
 }
 
 async function setWeekdayState(empId, day, newState){
@@ -257,7 +262,7 @@ async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
   employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; payRates = []; qbCustomerOverrides = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
-  wages = {}; shiftTemplates = []; timeEntries = []; clockStatus = null; admins = [];
+  wages = {}; shiftTemplates = []; timeEntries = []; qbNeedsReview = []; clockStatus = null; admins = [];
   render();
 }
 
@@ -1277,6 +1282,12 @@ function renderTimesheets(){
       <button data-action="week" data-dir="1">›</button>
     </div>
     <a class="btn" href="/api/timesheets/qb-export?weekStart=${toISO(dates[0])}" style="display:block;text-align:center;text-decoration:none;background:var(--brand);color:#fff;border:2px solid var(--brand);border-radius:var(--radius-md);padding:11px 16px;font-size:14px;font-weight:700;margin-top:12px;">Export for QuickBooks</a>
+    ${qbNeedsReview.length ? `<div class="err" style="margin-top:12px;">
+      <strong>${qbNeedsReview.length} ${qbNeedsReview.length===1?'entry':'entries'} left out of the export</strong> — QuickBooks requires a job code, and these couldn't be resolved automatically:
+      <ul style="margin:6px 0 0;padding-left:18px;">
+        ${qbNeedsReview.map(r=>`<li>${r.employee}, ${fmtDateShort(r.date)} — ${r.reason}</li>`).join('')}
+      </ul>
+    </div>` : ''}
   </div>`;
 
   const byEmp = {};
