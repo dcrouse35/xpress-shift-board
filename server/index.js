@@ -299,7 +299,7 @@ app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
 app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   const emp = db.data.employees.find(e => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found.' });
-  const { name, email, phone, defaultPositionId, hourlyWage, positionWages } = req.body || {};
+  const { name, email, phone, defaultPositionId, hourlyWage, positionWages, groupIds } = req.body || {};
   if (name !== undefined) {
     if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
     emp.name = name.trim();
@@ -321,6 +321,10 @@ app.patch('/api/employees/:id', requireAdmin, (req, res) => {
       if (Number.isFinite(n) && n >= 0) cleaned[posId] = n;
     });
     emp.positionWages = cleaned;
+  }
+  if (groupIds !== undefined) {
+    const validIds = new Set(db.data.groups.map(g => g.id));
+    emp.groupIds = Array.isArray(groupIds) ? groupIds.filter(id => validIds.has(id)) : [];
   }
   db.persist();
   res.json({ employee: adminEmployee(emp) });
@@ -395,6 +399,42 @@ app.delete('/api/positions/:id', requireAdmin, (req, res) => {
   db.data.employees.forEach(e => {
     if (e.defaultPositionId === req.params.id) delete e.defaultPositionId;
     if (e.positionWages) delete e.positionWages[req.params.id];
+  });
+  db.persist();
+  res.json({ ok: true });
+});
+
+// ---------- groups (labels for filtering/organizing staff, e.g. "Weekend Crew") ----------
+app.get('/api/groups', requireAnyAuth, (req, res) => {
+  res.json({ groups: db.data.groups });
+});
+
+app.post('/api/groups', requireAdmin, (req, res) => {
+  let { name } = req.body || {};
+  name = (name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Enter a group name.' });
+  const group = { id: uid('grp'), name };
+  db.data.groups.push(group);
+  db.persist();
+  res.json({ group });
+});
+
+app.patch('/api/groups/:id', requireAdmin, (req, res) => {
+  const group = db.data.groups.find(g => g.id === req.params.id);
+  if (!group) return res.status(404).json({ error: 'Group not found.' });
+  const { name } = req.body || {};
+  if (name !== undefined) {
+    if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
+    group.name = name.trim();
+  }
+  db.persist();
+  res.json({ group });
+});
+
+app.delete('/api/groups/:id', requireAdmin, (req, res) => {
+  db.data.groups = db.data.groups.filter(g => g.id !== req.params.id);
+  db.data.employees.forEach(e => {
+    if (e.groupIds) e.groupIds = e.groupIds.filter(id => id !== req.params.id);
   });
   db.persist();
   res.json({ ok: true });

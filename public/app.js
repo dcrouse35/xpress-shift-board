@@ -6,6 +6,8 @@ let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, 
 let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
 let ptoRequests = []; // [ {id, employeeId, startDate, endDate, reason, status, createdAt} ]
 let positions = []; // [ {id, name, color} ]
+let groups = []; // [ {id, name} ] — labels for organizing/filtering staff, e.g. "Weekend Crew"
+let groupFilter = ''; // selected group id on the admin schedule view, '' = all staff
 let wages = {}; // { employeeId: { hourlyWage, positionWages: {positionId: rate} } } — admin/supervisor only
 
 // The position's override rate wins when set; otherwise the employee's base hourly wage.
@@ -35,6 +37,7 @@ let adminSignupError = null;
 let adminLoginError = null;
 let importResultMsg = null;
 let positionError = null;
+let groupError = null;
 let templateError = null;
 let timesheetError = null;
 let teamError = null;
@@ -116,8 +119,8 @@ function isFullAdmin(){ return !!admin && admin.role !== 'supervisor'; }
 function isScheduler(){ return !!admin; } // admin or supervisor
 
 async function loadProtectedData(){
-  const [empRes, availRes, shiftRes, swapRes, ptoRes, posRes] = await Promise.all([
-    api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto'), api('/api/positions')
+  const [empRes, availRes, shiftRes, swapRes, ptoRes, posRes, groupRes] = await Promise.all([
+    api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto'), api('/api/positions'), api('/api/groups')
   ]);
   employees = empRes.employees;
   availability = availRes.availability;
@@ -125,6 +128,7 @@ async function loadProtectedData(){
   swapRequests = swapRes.swaps;
   ptoRequests = ptoRes.requests;
   positions = posRes.positions;
+  groups = groupRes.groups;
 
   if(isScheduler()){
     const [wageRes, tmplRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates') ]);
@@ -203,7 +207,7 @@ async function loginEmployee(email, password){
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
-  employees = []; availability = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = [];
+  employees = []; availability = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
   wages = {}; shiftTemplates = []; timeEntries = []; clockStatus = null; admins = [];
   render();
 }
@@ -326,6 +330,40 @@ function colorForShift(s){
     if(pos) return pos.color;
   }
   return null;
+}
+
+// ---------- groups (staff labels, e.g. "Weekend Crew") ----------
+async function addGroup(){
+  const nameInput = document.getElementById('newGroupName');
+  const name = nameInput ? nameInput.value.trim() : '';
+  if(!name){ groupError = "Enter a group name."; render(); return; }
+  try{
+    const res = await api('/api/groups', { method:'POST', body: JSON.stringify({ name }) });
+    groups.push(res.group);
+    groupError = null;
+  }catch(e){ groupError = e.message; }
+  render();
+}
+async function removeGroup(id){
+  if(!confirm('Remove this group? It will be unassigned from any staff who have it.')) return;
+  try{
+    await api(`/api/groups/${id}`, { method:'DELETE' });
+    groups = groups.filter(g=>g.id!==id);
+    employees.forEach(e=>{ if(e.groupIds) e.groupIds = e.groupIds.filter(id2=>id2!==id); });
+    if(groupFilter===id) groupFilter = '';
+  }catch(e){ groupError = e.message; }
+  render();
+}
+async function toggleStaffGroup(empId, groupId, checked){
+  const emp = employees.find(e=>e.id===empId);
+  if(!emp) return;
+  const current = emp.groupIds || [];
+  const next = checked ? current.concat(groupId) : current.filter(id=>id!==groupId);
+  try{
+    const res = await api(`/api/employees/${empId}`, { method:'PATCH', body: JSON.stringify({ groupIds: next }) });
+    emp.groupIds = res.employee.groupIds || [];
+  }catch(e){ loadError = e.message; }
+  render();
 }
 
 // ---------- shift swaps ----------
@@ -1477,11 +1515,18 @@ function renderScheduleView(opts){
                            .sort((a,b)=>a.name.localeCompare(b.name));
   } else {
     filterEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+    if(groupFilter) filterEmps = filterEmps.filter(e=>(e.groupIds||[]).includes(groupFilter));
   }
 
   html += `<div class="card" style="padding:12px 8px;">
     <h2 style="padding:0 8px;">This Week's Schedule</h2>
     <p class="empty" style="padding:0 8px 6px;">Open Shifts up top, then one row per person. ${readOnly?'':'Click any shift to edit it, or "+ Add" to create one.'}</p>
+    ${(!readOnly && groups.length) ? `<div style="padding:0 8px;">
+      <select id="scheduleGroupFilter">
+        <option value="">All staff</option>
+        ${groups.map(g=>`<option value="${g.id}" ${groupFilter===g.id?'selected':''}>${g.name}</option>`).join('')}
+      </select>
+    </div>` : ''}
   </div>`;
 
   html += `<div class="card" style="padding:8px;">${renderEmployeeGrid(dates, readOnly, filterEmps)}</div>`;
@@ -1582,6 +1627,21 @@ function renderManagerView(){
     <button class="primary" style="width:100%;margin-top:12px;" data-action="addposition">Add position</button>
   </div>`;
 
+  if(groupError) html += `<div class="err">${groupError}</div>`;
+  html += `<div class="card">
+    <h2>Groups</h2>
+    <p class="empty" style="padding:0 0 10px;">Labels you can tag onto staff to organize or filter the schedule — e.g. "Weekend Crew" or "Tony's Regulars".</p>
+    ${groups.length ? groups.map(g=>`
+      <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+        <span>${g.name}</span>
+        <button class="danger" data-action="removegroup" data-id="${g.id}">Remove</button>
+      </div>
+    `).join('') : '<p class="empty" style="padding:0 0 10px;">No groups yet.</p>'}
+    <label style="margin-top:12px;">New group name</label>
+    <input type="text" id="newGroupName" placeholder="e.g. Weekend Crew" />
+    <button class="primary" style="width:100%;margin-top:12px;" data-action="addgroup">Add group</button>
+  </div>`;
+
   const dates = getWeekDates(weekOffset);
   const emps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
 
@@ -1618,16 +1678,16 @@ function renderManagerView(){
   if(openDayKey && emps.length){
     const d = dates.find(dd=>toISO(dd)===openDayKey);
     if(d){
-      const groups = {available:[], unavailable:[], unset:[]};
+      const dayGroups = {available:[], unavailable:[], unset:[]};
       emps.forEach(emp=>{
         const state = (availability[emp.id] && availability[emp.id][openDayKey]) || 'unset';
-        groups[state].push(emp.name);
+        dayGroups[state].push(emp.name);
       });
       html += `<div class="card breakdown">
         <h3>${fmtDayName(d)}, ${fmtDayShort(d)}</h3>
-        ${renderGroup('available','Available',groups.available)}
-        ${renderGroup('unavailable','Unavailable',groups.unavailable)}
-        ${renderGroup('unset',"Haven't responded",groups.unset)}
+        ${renderGroup('available','Available',dayGroups.available)}
+        ${renderGroup('unavailable','Unavailable',dayGroups.unavailable)}
+        ${renderGroup('unset',"Haven't responded",dayGroups.unset)}
       </div>`;
     }
   }
@@ -1664,6 +1724,17 @@ function renderStaffDirectory(emps){
                 <input type="number" min="0" step="0.25" placeholder="${p.name} rate (uses base if blank)" style="padding-left:26px;" value="${(wages[emp.id]&&wages[emp.id].positionWages&&wages[emp.id].positionWages[p.id]!==undefined)?wages[emp.id].positionWages[p.id]:''}" data-action="staffposwage" data-id="${emp.id}" data-position="${p.id}" />
               </div>
             `).join('')}
+          </div>` : ''}
+          ${groups.length ? `<div class="staffgroups" style="grid-column:1 / -1;">
+            <div class="formsection" style="margin:6px 0 4px;">Groups</div>
+            <div class="row" style="flex-wrap:wrap;gap:10px;">
+              ${groups.map(g=>`
+                <label class="row" style="gap:5px;cursor:pointer;">
+                  <input type="checkbox" data-action="staffgroup" data-id="${emp.id}" data-group="${g.id}" ${(emp.groupIds||[]).includes(g.id)?'checked':''} />
+                  <span>${g.name}</span>
+                </label>
+              `).join('')}
+            </div>
           </div>` : ''}
         </div>
         <div class="staffcard-status">${emp.onboarded ? 'Signed up' : 'Not signed up yet'}</div>
@@ -1755,6 +1826,12 @@ function bindEvents(){
 
   app.querySelectorAll('[data-action="addposition"]').forEach(b=> b.onclick = ()=> addPosition());
   app.querySelectorAll('[data-action="removeposition"]').forEach(b=> b.onclick = ()=> removePosition(b.dataset.id));
+
+  app.querySelectorAll('[data-action="addgroup"]').forEach(b=> b.onclick = ()=> addGroup());
+  app.querySelectorAll('[data-action="removegroup"]').forEach(b=> b.onclick = ()=> removeGroup(b.dataset.id));
+  app.querySelectorAll('[data-action="staffgroup"]').forEach(el=> el.onchange = ()=>{
+    toggleStaffGroup(el.dataset.id, el.dataset.group, el.checked);
+  });
   app.querySelectorAll('input[name="newPositionColor"]').forEach(radio=>{
     const sync = ()=>{
       app.querySelectorAll('.colorswatch').forEach(sw=>{
@@ -1848,6 +1925,9 @@ function bindEvents(){
       render();
     }
   });
+
+  const groupFilterSel = app.querySelector('#scheduleGroupFilter');
+  if(groupFilterSel) groupFilterSel.onchange = ()=>{ groupFilter = groupFilterSel.value; render(); };
 
   app.querySelectorAll('[data-action="toggleday"]').forEach(b=> b.onclick = ()=>{
     if(!me) return;
