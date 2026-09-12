@@ -723,10 +723,18 @@ function el(html){
 // ---------- top-level render ----------
 function render(){
   const app = document.getElementById('app');
-  if(!loaded){ app.innerHTML = '<div class="loading">Loading shift board…</div>'; return; }
+  if(!loaded){ app.innerHTML = '<div class="loading">Loading Shiftline…</div>'; return; }
 
   let html = '';
-  html += `<div class="masthead"><img class="masthead-logo" src="/assets/logo-black.png" alt="Xpress Parking" /><div class="titles"><h1>Shift Board</h1></div></div>`;
+  html += `<div class="masthead">
+    <svg class="masthead-mark" viewBox="0 0 34 34" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="34" height="34" rx="8" fill="var(--ink)"/>
+      <line x1="9" y1="25" x2="16" y2="9" stroke="var(--brand)" stroke-width="4" stroke-linecap="round"/>
+      <line x1="14" y1="27" x2="23" y2="9" stroke="var(--brand)" stroke-width="4" stroke-linecap="round"/>
+      <line x1="19" y1="29" x2="30" y2="11" stroke="var(--brand)" stroke-width="4" stroke-linecap="round"/>
+    </svg>
+    <div class="titles"><h1>Shiftline</h1><span class="tagline">Xpress Parking Services</span></div>
+  </div>`;
 
   if(loadError){
     html += `<div class="err">${loadError}</div>`;
@@ -1376,7 +1384,7 @@ function renderEmployeeGrid(dates, readOnly, filterEmps){
         const openTag = (b.kind==='custom' && b.shift.open && !getShiftEmployeeIds(b.shift).length) ? ' <span class="tag unset">OPEN</span>' : '';
         const conflictTag = b.conflict ? ' <span class="tag unavailable" title="Overlaps another shift this day">⚠</span>' : '';
         const availTag = b.availConflict ? ' <span class="tag unavailable" title="Scheduled while marked unavailable (or on approved time off)">🚫</span>' : '';
-        const colorStyle = b.color ? `border-left-color:${b.color};background:${b.color}1A;` : '';
+        const colorStyle = b.color ? `border-color:${b.color};background:${b.color}1A;` : '';
         const action = readOnly ? '' : (b.kind==='slot'
           ? `data-action="openslot" data-date="${b.date}" data-lot="${b.lot}" data-slotid="${b.slotId}" data-start="${b.start}" data-end="${b.end}"`
           : `data-action="openshift" data-shiftid="${b.shift.id}"`);
