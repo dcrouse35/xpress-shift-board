@@ -158,6 +158,33 @@ app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
   res.json({ employee: publicEmployee(req.employee) });
 });
 
+app.patch('/api/employees/:id', (req, res) => {
+  const emp = db.data.employees.find(e => e.id === req.params.id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found.' });
+  const { name, email, phone, lot } = req.body || {};
+  if (name !== undefined) {
+    if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
+    emp.name = name.trim();
+  }
+  if (email !== undefined) emp.email = email.trim();
+  if (phone !== undefined) emp.phone = phone.trim();
+  if (lot !== undefined) emp.lot = lot;
+  db.persist();
+  res.json({ employee: publicEmployee(emp) });
+});
+
+app.delete('/api/employees/:id', (req, res) => {
+  const idx = db.data.employees.findIndex(e => e.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Employee not found.' });
+  db.data.employees.splice(idx, 1);
+  delete db.data.availability[req.params.id];
+  db.data.shifts.forEach(s => {
+    if (s.employeeIds) s.employeeIds = s.employeeIds.filter(id => id !== req.params.id);
+  });
+  db.persist();
+  res.json({ ok: true });
+});
+
 app.post('/api/employees/import', (req, res) => {
   const existing = new Set(db.data.employees.map(e => e.name.trim().toLowerCase()));
   let added = 0;
@@ -278,6 +305,72 @@ app.post('/api/shifts/publish', (req, res) => {
   if (!weekStart) return res.status(400).json({ error: 'Missing weekStart.' });
   const isoSet = new Set(weekDatesFrom(weekStart).map(toISO));
   db.data.shifts.forEach(s => { if (isoSet.has(s.date)) s.draft = false; });
+  db.persist();
+  res.json({ ok: true });
+});
+
+// ---------- shift swaps ----------
+app.get('/api/swaps', (req, res) => {
+  res.json({ swaps: db.data.swapRequests });
+});
+
+app.post('/api/swaps', requireLogin, (req, res) => {
+  const { shiftId, toEmployeeId } = req.body || {};
+  const shift = findShift(shiftId);
+  if (!shift) return res.status(404).json({ error: 'Shift not found.' });
+  if (!(shift.employeeIds || []).includes(req.employee.id)) {
+    return res.status(400).json({ error: "You're not assigned to that shift." });
+  }
+  if (!toEmployeeId || toEmployeeId === req.employee.id) {
+    return res.status(400).json({ error: 'Pick a coworker to offer the shift to.' });
+  }
+  const coworker = db.data.employees.find(e => e.id === toEmployeeId);
+  if (!coworker) return res.status(404).json({ error: 'That employee no longer exists.' });
+  const already = db.data.swapRequests.find(r => r.shiftId === shiftId && r.fromEmployeeId === req.employee.id);
+  if (already) return res.status(400).json({ error: 'You already have a pending swap for this shift.' });
+
+  const request = {
+    id: uid('sw'),
+    shiftId,
+    fromEmployeeId: req.employee.id,
+    toEmployeeId,
+    createdAt: new Date().toISOString()
+  };
+  db.data.swapRequests.push(request);
+  db.persist();
+  res.json({ request });
+});
+
+app.post('/api/swaps/:id/accept', requireLogin, (req, res) => {
+  const request = db.data.swapRequests.find(r => r.id === req.params.id);
+  if (!request) return res.status(404).json({ error: 'Swap request not found.' });
+  if (request.toEmployeeId !== req.employee.id) return res.status(403).json({ error: 'This swap is not addressed to you.' });
+  const shift = findShift(request.shiftId);
+  if (shift) {
+    const ids = (shift.employeeIds || []).filter(id => id !== request.fromEmployeeId);
+    if (!ids.includes(request.toEmployeeId)) ids.push(request.toEmployeeId);
+    shift.employeeIds = ids;
+    shift.draft = true;
+  }
+  db.data.swapRequests = db.data.swapRequests.filter(r => r.id !== req.params.id);
+  db.persist();
+  res.json({ shift: shift || null });
+});
+
+app.post('/api/swaps/:id/decline', requireLogin, (req, res) => {
+  const request = db.data.swapRequests.find(r => r.id === req.params.id);
+  if (!request) return res.status(404).json({ error: 'Swap request not found.' });
+  if (request.toEmployeeId !== req.employee.id) return res.status(403).json({ error: 'This swap is not addressed to you.' });
+  db.data.swapRequests = db.data.swapRequests.filter(r => r.id !== req.params.id);
+  db.persist();
+  res.json({ ok: true });
+});
+
+app.delete('/api/swaps/:id', requireLogin, (req, res) => {
+  const request = db.data.swapRequests.find(r => r.id === req.params.id);
+  if (!request) return res.status(404).json({ error: 'Swap request not found.' });
+  if (request.fromEmployeeId !== req.employee.id) return res.status(403).json({ error: 'This is not your swap request.' });
+  db.data.swapRequests = db.data.swapRequests.filter(r => r.id !== req.params.id);
   db.persist();
   res.json({ ok: true });
 });

@@ -3,6 +3,8 @@ const { LOTS, EMP_HOME_TAGS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotAppl
 let employees = [];
 let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } }
 let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, end, draft} ]
+let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
+let swapError = null;
 let role = "employee"; // employee | schedule | manager
 let me = null; // current logged-in employee (sanitized, no password)
 let currentEmployeeId = null;
@@ -70,8 +72,8 @@ async function api(path, opts){
 
 async function loadAll(){
   try{
-    const [empRes, availRes, shiftRes, meRes] = await Promise.all([
-      api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/me')
+    const [empRes, availRes, shiftRes, meRes, swapRes] = await Promise.all([
+      api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/me'), api('/api/swaps')
     ]);
     employees = empRes.employees;
     availability = availRes.availability;
@@ -79,6 +81,7 @@ async function loadAll(){
     me = meRes.employee;
     currentEmployeeId = me ? me.id : null;
     loggedInId = currentEmployeeId;
+    swapRequests = swapRes.swaps;
   }catch(e){
     loadError = "Couldn't load the shift board — check your connection and reload.";
   }
@@ -169,6 +172,71 @@ async function updateMyInfo(){
     signupError = null;
   }catch(e){ signupError = e.message; }
   render();
+}
+
+async function updateStaffField(empId, field, value){
+  try{
+    const res = await api(`/api/employees/${empId}`, { method:'PATCH', body: JSON.stringify({ [field]: value }) });
+    const idx = employees.findIndex(e=>e.id===empId);
+    if(idx>=0) employees[idx] = res.employee;
+  }catch(e){ loadError = e.message; }
+  render();
+}
+
+async function removeStaffMember(empId){
+  try{
+    await api(`/api/employees/${empId}`, { method:'DELETE' });
+    employees = employees.filter(e=>e.id!==empId);
+    delete availability[empId];
+    shifts.forEach(s=>{ s.employeeIds = (s.employeeIds||[]).filter(id=>id!==empId); });
+  }catch(e){ loadError = e.message; }
+  render();
+}
+
+// ---------- shift swaps ----------
+async function requestSwap(shiftId, toEmployeeId){
+  try{
+    const res = await api('/api/swaps', { method:'POST', body: JSON.stringify({ shiftId, toEmployeeId }) });
+    swapRequests.push(res.request);
+    swapError = null;
+  }catch(e){ swapError = e.message; }
+  render();
+}
+async function acceptSwap(requestId){
+  try{
+    const res = await api(`/api/swaps/${requestId}/accept`, { method:'POST' });
+    if(res.shift){
+      const idx = shifts.findIndex(s=>s.id===res.shift.id);
+      if(idx>=0) shifts[idx] = res.shift;
+    }
+    swapRequests = swapRequests.filter(r=>r.id!==requestId);
+  }catch(e){ swapError = e.message; }
+  render();
+}
+async function declineSwap(requestId){
+  try{
+    await api(`/api/swaps/${requestId}/decline`, { method:'POST' });
+    swapRequests = swapRequests.filter(r=>r.id!==requestId);
+  }catch(e){ swapError = e.message; }
+  render();
+}
+async function cancelSwap(requestId){
+  try{
+    await api(`/api/swaps/${requestId}`, { method:'DELETE' });
+    swapRequests = swapRequests.filter(r=>r.id!==requestId);
+  }catch(e){ swapError = e.message; }
+  render();
+}
+function describeShift(shift){
+  const d = new Date(shift.date+'T00:00:00');
+  let label;
+  if(shift.slotId){
+    const template = (DAILY_TEMPLATES[shift.lot]||[]).find(sl=>sl.id===shift.slotId);
+    label = shift.lot + (template ? ' — '+template.label : '');
+  } else {
+    label = shift.lot + (shift.customName ? ' — '+shift.customName : ' — Extra shift');
+  }
+  return `${label} · ${fmtDayName(d)}, ${fmtDayShort(d)} · ${fmt12(shift.start)}–${fmt12(shift.end)}`;
 }
 
 // ---------- shifts ----------
@@ -432,6 +500,28 @@ function renderEmployeeView(){
   if(signupError){
     html += `<div class="err">${signupError}</div>`;
   }
+  if(swapError){
+    html += `<div class="err">${swapError}</div>`;
+  }
+
+  const incoming = swapRequests.filter(r=>r.toEmployeeId===emp.id);
+  if(incoming.length){
+    html += `<div class="card"><h2>Shift swaps for you</h2>`;
+    html += incoming.map(r=>{
+      const shift = shifts.find(s=>s.id===r.shiftId);
+      const from = employees.find(e=>e.id===r.fromEmployeeId);
+      if(!shift) return '';
+      return `<div class="staffcard">
+        <div class="staffcard-status" style="margin-top:0;">${from?from.name:'A coworker'} wants you to take:</div>
+        <div style="font-weight:700;margin:4px 0 10px;">${describeShift(shift)}</div>
+        <div class="row">
+          <button class="primary" style="flex:1;" data-action="acceptswap" data-id="${r.id}">Accept</button>
+          <button class="ghost" style="flex:1;" data-action="declineswap" data-id="${r.id}">Decline</button>
+        </div>
+      </div>`;
+    }).join('');
+    html += `</div>`;
+  }
 
   html += `<div class="card">
     <h2>Your info</h2>
@@ -478,6 +568,37 @@ function renderEmployeeView(){
       const state = empAvail[iso];
       html += `<div class="summaryline"><span>${fmtDayName(d)}, ${fmtDayShort(d)}</span><span class="tag ${state||'unset'}">${state?STATE_LABEL[state]:'Not set'}</span></div>`;
     });
+  }
+  html += `</div>`;
+
+  const myShifts = shifts.filter(s=>getShiftEmployeeIds(s).includes(emp.id) && dates.some(d=>toISO(d)===s.date))
+                          .sort((a,b)=> a.date===b.date ? a.start.localeCompare(b.start) : a.date.localeCompare(b.date));
+  html += `<div class="card"><h2>Your shifts this week</h2>`;
+  if(!myShifts.length){
+    html += `<p class="empty">Nothing assigned to you this week yet.</p>`;
+  } else {
+    html += myShifts.map(s=>{
+      const outgoing = swapRequests.find(r=>r.shiftId===s.id && r.fromEmployeeId===emp.id);
+      if(outgoing){
+        const to = employees.find(e=>e.id===outgoing.toEmployeeId);
+        return `<div class="staffcard">
+          <div style="font-weight:700;margin-bottom:8px;">${describeShift(s)}</div>
+          <div class="row" style="justify-content:space-between;">
+            <span class="empty" style="padding:0;">Swap requested → ${to?to.name:'coworker'}</span>
+            <button class="danger" data-action="cancelswap" data-id="${outgoing.id}">Cancel</button>
+          </div>
+        </div>`;
+      }
+      const coworkerOptions = employees.filter(e=>e.id!==emp.id).sort((a,b)=>a.name.localeCompare(b.name))
+        .map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
+      return `<div class="staffcard">
+        <div style="font-weight:700;margin-bottom:8px;">${describeShift(s)}</div>
+        <select data-action="offerswap" data-shiftid="${s.id}">
+          <option value="">Offer this shift to…</option>
+          ${coworkerOptions}
+        </select>
+      </div>`;
+    }).join('');
   }
   html += `</div>`;
 
@@ -721,6 +842,34 @@ function renderManagerView(){
     }
   }
 
+  html += renderStaffDirectory(emps);
+
+  return html;
+}
+
+function renderStaffDirectory(emps){
+  let html = `<div class="card"><h2>Staff Directory</h2>`;
+  if(emps.length===0){
+    html += `<p class="empty">No staff to show for this lot yet.</p>`;
+  } else {
+    html += emps.map(emp=>`
+      <div class="staffcard">
+        <div class="staffcard-head">
+          <input type="text" class="staffname" value="${emp.name}" data-action="staffedit" data-id="${emp.id}" data-field="name" />
+          <button class="danger" data-action="removestaff" data-id="${emp.id}">Remove</button>
+        </div>
+        <div class="staffcard-fields">
+          <input type="text" placeholder="Email" value="${emp.email||''}" data-action="staffedit" data-id="${emp.id}" data-field="email" />
+          <input type="text" placeholder="Phone" value="${emp.phone||''}" data-action="staffedit" data-id="${emp.id}" data-field="phone" />
+          <select data-action="staffedit" data-id="${emp.id}" data-field="lot">
+            ${EMP_HOME_TAGS.map(l=>`<option value="${l}" ${emp.lot===l?'selected':''}>${l}</option>`).join('')}
+          </select>
+        </div>
+        <div class="staffcard-status">${emp.onboarded ? 'Signed up' : 'Not signed up yet'}</div>
+      </div>
+    `).join('');
+  }
+  html += `</div>`;
   return html;
 }
 
@@ -764,6 +913,14 @@ function bindEvents(){
       if(idx>=0) employees[idx] = me;
     }catch(e){ loadError = e.message; }
     render();
+  });
+
+  app.querySelectorAll('[data-action="acceptswap"]').forEach(b=> b.onclick = ()=> acceptSwap(b.dataset.id));
+  app.querySelectorAll('[data-action="declineswap"]').forEach(b=> b.onclick = ()=> declineSwap(b.dataset.id));
+  app.querySelectorAll('[data-action="cancelswap"]').forEach(b=> b.onclick = ()=> cancelSwap(b.dataset.id));
+  app.querySelectorAll('[data-action="offerswap"]').forEach(sel=> sel.onchange = ()=>{
+    if(!sel.value) return;
+    requestSwap(sel.dataset.shiftid, sel.value);
   });
 
   const lotSelect = app.querySelector('#lotSelect');
@@ -832,6 +989,15 @@ function bindEvents(){
     const date = th.dataset.date;
     openDayKey = (openDayKey===date) ? null : date;
     render();
+  });
+
+  app.querySelectorAll('[data-action="staffedit"]').forEach(el=> el.onchange = ()=>{
+    updateStaffField(el.dataset.id, el.dataset.field, el.value);
+  });
+  app.querySelectorAll('[data-action="removestaff"]').forEach(b=> b.onclick = ()=>{
+    if(confirm('Remove this person? This deletes their profile, availability, and any shift assignments.')){
+      removeStaffMember(b.dataset.id);
+    }
   });
 }
 

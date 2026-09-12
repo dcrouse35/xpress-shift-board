@@ -122,6 +122,15 @@ button:disabled{opacity:.5;cursor:default;}
 .blist.unavailable .btitle{color:var(--stop);background:var(--stop-bg);}
 .blist.unset .btitle{color:var(--ink-muted);background:var(--bg);}
 
+.staffcard{border:1px solid var(--line);border-radius:var(--radius-md);padding:12px;margin-bottom:10px;}
+.staffcard:last-child{margin-bottom:0;}
+.staffcard-head{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
+.staffcard-head .staffname{font-weight:700;flex:1;}
+.staffcard-head button{flex-shrink:0;}
+.staffcard-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.staffcard-fields select{grid-column:1 / -1;}
+.staffcard-status{font-size:11.5px;color:var(--ink-muted);margin-top:8px;}
+
 .empty{font-size:13.5px;color:var(--ink-muted);padding:6px 2px;line-height:1.5;}
 .footnote{font-size:11.5px;color:var(--ink-muted);margin-top:12px;line-height:1.6;padding:0 4px;}
 .loading{padding:40px 0;text-align:center;color:var(--ink-muted);font-size:14px;}
