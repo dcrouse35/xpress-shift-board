@@ -47,7 +47,7 @@ function uid(prefix) {
 // every signed-in user (including coworkers) can read.
 function publicEmployee(e) {
   if (!e) return null;
-  const { passwordHash, hourlyWage, ...rest } = e;
+  const { passwordHash, hourlyWage, positionWages, ...rest } = e;
   return rest;
 }
 // Used only for responses the requesting admin/supervisor is entitled to see
@@ -299,7 +299,7 @@ app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
 app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   const emp = db.data.employees.find(e => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found.' });
-  const { name, email, phone, defaultPositionId, hourlyWage } = req.body || {};
+  const { name, email, phone, defaultPositionId, hourlyWage, positionWages } = req.body || {};
   if (name !== undefined) {
     if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
     emp.name = name.trim();
@@ -311,13 +311,26 @@ app.patch('/api/employees/:id', requireAdmin, (req, res) => {
     const n = Number(hourlyWage);
     emp.hourlyWage = Number.isFinite(n) && n >= 0 ? n : 0;
   }
+  // Per-position pay rate overrides — e.g. a runner who also fills in as
+  // manager may earn a different rate in that role. Missing/blank entries
+  // fall back to the employee's base hourlyWage at cost-calculation time.
+  if (positionWages !== undefined && typeof positionWages === 'object' && positionWages !== null) {
+    const cleaned = {};
+    Object.keys(positionWages).forEach(posId => {
+      const n = Number(positionWages[posId]);
+      if (Number.isFinite(n) && n >= 0) cleaned[posId] = n;
+    });
+    emp.positionWages = cleaned;
+  }
   db.persist();
   res.json({ employee: adminEmployee(emp) });
 });
 
 app.get('/api/wages', requireScheduler, (req, res) => {
   const wages = {};
-  db.data.employees.forEach(e => { wages[e.id] = e.hourlyWage || 0; });
+  db.data.employees.forEach(e => {
+    wages[e.id] = { hourlyWage: e.hourlyWage || 0, positionWages: e.positionWages || {} };
+  });
   res.json({ wages });
 });
 
@@ -379,7 +392,10 @@ app.patch('/api/positions/:id', requireAdmin, (req, res) => {
 app.delete('/api/positions/:id', requireAdmin, (req, res) => {
   db.data.positions = db.data.positions.filter(p => p.id !== req.params.id);
   db.data.shifts.forEach(s => { if (s.positionId === req.params.id) delete s.positionId; });
-  db.data.employees.forEach(e => { if (e.defaultPositionId === req.params.id) delete e.defaultPositionId; });
+  db.data.employees.forEach(e => {
+    if (e.defaultPositionId === req.params.id) delete e.defaultPositionId;
+    if (e.positionWages) delete e.positionWages[req.params.id];
+  });
   db.persist();
   res.json({ ok: true });
 });

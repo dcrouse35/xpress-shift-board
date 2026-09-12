@@ -6,7 +6,15 @@ let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, 
 let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
 let ptoRequests = []; // [ {id, employeeId, startDate, endDate, reason, status, createdAt} ]
 let positions = []; // [ {id, name, color} ]
-let wages = {}; // { employeeId: hourlyWage } — admin/supervisor only
+let wages = {}; // { employeeId: { hourlyWage, positionWages: {positionId: rate} } } — admin/supervisor only
+
+// The position's override rate wins when set; otherwise the employee's base hourly wage.
+function rateFor(employeeId, positionId){
+  const w = wages[employeeId];
+  if(!w) return 0;
+  if(positionId && w.positionWages && w.positionWages[positionId]!==undefined) return w.positionWages[positionId];
+  return w.hourlyWage || 0;
+}
 let shiftTemplates = []; // [ {id, label, start, end} ]
 let timeEntries = []; // [ {id, employeeId, date, clockIn, clockOut} ] — current timesheets week
 let clockStatus = null; // staff's own open time-clock entry, or null
@@ -253,10 +261,22 @@ async function updateMyInfo(){
 async function updateStaffField(empId, field, value){
   try{
     const res = await api(`/api/employees/${empId}`, { method:'PATCH', body: JSON.stringify({ [field]: value }) });
-    if(res.employee.hourlyWage !== undefined) wages[empId] = res.employee.hourlyWage;
-    const { hourlyWage, ...sanitized } = res.employee;
+    if(res.employee.hourlyWage !== undefined) wages[empId] = { hourlyWage: res.employee.hourlyWage, positionWages: (wages[empId]&&wages[empId].positionWages)||{} };
+    const { hourlyWage, positionWages, ...sanitized } = res.employee;
     const idx = employees.findIndex(e=>e.id===empId);
     if(idx>=0) employees[idx] = sanitized;
+  }catch(e){ loadError = e.message; }
+  render();
+}
+
+async function updateStaffPositionWage(empId, positionId, value){
+  const current = (wages[empId] && wages[empId].positionWages) || {};
+  const next = { ...current };
+  if(value === '' || value === null || value === undefined) delete next[positionId];
+  else next[positionId] = value;
+  try{
+    const res = await api(`/api/employees/${empId}`, { method:'PATCH', body: JSON.stringify({ positionWages: next }) });
+    wages[empId] = { hourlyWage: (wages[empId]&&wages[empId].hourlyWage)||0, positionWages: res.employee.positionWages || {} };
   }catch(e){ loadError = e.message; }
   render();
 }
@@ -1249,7 +1269,7 @@ function buildScheduleRows(dates, filterEmps){
     // only meaningful for an actual person's row, never the Open Shifts
     // holding row where many different unfilled positions naturally overlap.
     const blocks = cells[k];
-    blocks.forEach(b=>{ b.conflict = false; });
+    blocks.forEach(b=>{ b.conflict = false; b.availConflict = false; });
     if(k.startsWith('OPEN|')) return;
     for(let i=0;i<blocks.length;i++){
       for(let j=i+1;j<blocks.length;j++){
@@ -1258,6 +1278,14 @@ function buildScheduleRows(dates, filterEmps){
         const bs = B.kind==='slot'?B.start:B.shift.start, be = B.kind==='slot'?B.end:B.shift.end;
         if(rangesOverlap(as, ae, bs, be)){ A.conflict = true; B.conflict = true; }
       }
+    }
+    // Flag shifts scheduled against a day the employee marked unavailable —
+    // approved PTO also lands here since approving a request marks those
+    // dates unavailable, so this one check covers both cases.
+    const empId = k.split('|')[0];
+    const empAvail = availability[empId];
+    if(empAvail){
+      blocks.forEach(b=>{ if(empAvail[b.date]==='unavailable') b.availConflict = true; });
     }
   });
 
@@ -1272,7 +1300,7 @@ function buildScheduleRows(dates, filterEmps){
       const end = b.kind==='slot' ? b.end : b.shift.end;
       const hrs = shiftHours(start, end);
       weeklyHours[key] = (weeklyHours[key]||0) + hrs;
-      totalCost += hrs * (wages[key] || 0);
+      totalCost += hrs * rateFor(key, b.shift ? b.shift.positionId : null);
     });
   });
 
@@ -1309,12 +1337,13 @@ function renderEmployeeGrid(dates, readOnly, filterEmps){
         const draft = b.kind==='slot' ? (b.shift && b.shift.draft) : b.shift.draft;
         const openTag = (b.kind==='custom' && b.shift.open && !getShiftEmployeeIds(b.shift).length) ? ' <span class="tag unset">OPEN</span>' : '';
         const conflictTag = b.conflict ? ' <span class="tag unavailable" title="Overlaps another shift this day">⚠</span>' : '';
+        const availTag = b.availConflict ? ' <span class="tag unavailable" title="Scheduled while marked unavailable (or on approved time off)">🚫</span>' : '';
         const colorStyle = b.color ? `border-left-color:${b.color};background:${b.color}1A;` : '';
         const action = readOnly ? '' : (b.kind==='slot'
           ? `data-action="openslot" data-date="${b.date}" data-lot="${b.lot}" data-slotid="${b.slotId}" data-start="${b.start}" data-end="${b.end}"`
           : `data-action="openshift" data-shiftid="${b.shift.id}"`);
         html += `<div class="schedchip" ${action} style="${colorStyle}${readOnly?'':'cursor:pointer;'}">
-          <div class="schedchip-label">${b.label}${openTag}${conflictTag}</div>
+          <div class="schedchip-label">${b.label}${openTag}${conflictTag}${availTag}</div>
           <div class="schedchip-time">${timeStr}${draft?' · Draft':''}</div>
         </div>`;
       });
@@ -1625,8 +1654,17 @@ function renderStaffDirectory(emps){
           <select data-action="staffedit" data-id="${emp.id}" data-field="defaultPositionId">${positionOptionsHtml(emp.defaultPositionId)}</select>
           <div class="field" style="margin-top:0;grid-column:1 / -1;">
             <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--ink-muted);font-size:14px;">$</span>
-            <input type="number" min="0" step="0.25" placeholder="Hourly wage" style="padding-left:26px;" value="${wages[emp.id]||''}" data-action="staffedit" data-id="${emp.id}" data-field="hourlyWage" />
+            <input type="number" min="0" step="0.25" placeholder="Base hourly wage" style="padding-left:26px;" value="${(wages[emp.id]&&wages[emp.id].hourlyWage)||''}" data-action="staffedit" data-id="${emp.id}" data-field="hourlyWage" />
           </div>
+          ${positions.length ? `<div class="posWages" style="grid-column:1 / -1;">
+            <div class="formsection" style="margin:6px 0 4px;">Pay rate by position (optional)</div>
+            ${positions.map(p=>`
+              <div class="field" style="margin-top:4px;">
+                <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--ink-muted);font-size:14px;">$</span>
+                <input type="number" min="0" step="0.25" placeholder="${p.name} rate (uses base if blank)" style="padding-left:26px;" value="${(wages[emp.id]&&wages[emp.id].positionWages&&wages[emp.id].positionWages[p.id]!==undefined)?wages[emp.id].positionWages[p.id]:''}" data-action="staffposwage" data-id="${emp.id}" data-position="${p.id}" />
+              </div>
+            `).join('')}
+          </div>` : ''}
         </div>
         <div class="staffcard-status">${emp.onboarded ? 'Signed up' : 'Not signed up yet'}</div>
       </div>
@@ -1826,6 +1864,9 @@ function bindEvents(){
 
   app.querySelectorAll('[data-action="staffedit"]').forEach(el=> el.onchange = ()=>{
     updateStaffField(el.dataset.id, el.dataset.field, el.value);
+  });
+  app.querySelectorAll('[data-action="staffposwage"]').forEach(el=> el.onchange = ()=>{
+    updateStaffPositionWage(el.dataset.id, el.dataset.position, el.value);
   });
   app.querySelectorAll('[data-action="removestaff"]').forEach(b=> b.onclick = ()=>{
     if(confirm('Remove this person? This deletes their profile, availability, and any shift assignments.')){
