@@ -557,14 +557,22 @@ function fmtDateShort(iso){ return new Date(iso+'T00:00:00').toLocaleDateString(
 // ---------- shifts ----------
 function getShiftEmployeeIds(s){ return s.employeeIds || []; }
 
+// A pending request hasn't marked the employee unavailable yet (that only
+// happens on approval), so this catches the gap between "asked for the day
+// off" and a manager actually approving it.
+function hasRequestedOff(employeeId, iso){
+  return ptoRequests.some(r=> r.employeeId===employeeId && r.status!=='denied' && iso>=r.startDate && iso<=r.endDate);
+}
+
 function slotOptionsHtml(iso, assignedId){
   const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
   let options = `<option value="">— Open —</option>`;
   sortedEmps.forEach(emp=>{
     const st = (availability[emp.id] && availability[emp.id][iso]) || null;
-    if(st === 'unavailable' && emp.id !== assignedId) return;
+    const unavailable = st === 'unavailable' || hasRequestedOff(emp.id, iso);
+    if(unavailable && emp.id !== assignedId) return;
     let label = emp.name;
-    if(st === 'unavailable') label += ' (unavailable)';
+    if(unavailable) label += ' (unavailable)';
     options += `<option value="${emp.id}" ${emp.id===assignedId?'selected':''}>${label}</option>`;
   });
   return options;
@@ -576,7 +584,7 @@ function addAssigneeOptionsHtml(iso, excludeIds){
   sortedEmps.forEach(emp=>{
     if(excludeIds.includes(emp.id)) return;
     const st = (availability[emp.id] && availability[emp.id][iso]) || null;
-    if(st === 'unavailable') return;
+    if(st === 'unavailable' || hasRequestedOff(emp.id, iso)) return;
     opts += `<option value="${emp.id}">${emp.name}</option>`;
   });
   return opts;
@@ -1028,7 +1036,9 @@ function renderMySchedule(emp){
           </div>
         </div>`;
       }
-      const coworkerOptions = employees.filter(e=>e.id!==emp.id).sort((a,b)=>a.name.localeCompare(b.name))
+      const coworkerOptions = employees.filter(e=>e.id!==emp.id)
+        .filter(e=>{ const st=(availability[e.id]||{})[s.date]; return st!=='unavailable' && !hasRequestedOff(e.id, s.date); })
+        .sort((a,b)=>a.name.localeCompare(b.name))
         .map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
       return `<div class="staffcard">
         <div style="font-weight:700;margin-bottom:8px;">${describeShift(s)}</div>
@@ -1045,7 +1055,7 @@ function renderMySchedule(emp){
   const openShifts = shifts.filter(s=>s.open && !getShiftEmployeeIds(s).length && s.date>=todayIso)
                             .filter(s=>{
                               const st = (availability[emp.id]||{})[s.date];
-                              return st !== 'unavailable';
+                              return st !== 'unavailable' && !hasRequestedOff(emp.id, s.date);
                             })
                             .sort((a,b)=> a.date===b.date ? a.start.localeCompare(b.start) : a.date.localeCompare(b.date));
   html += `<div class="card"><h2>Open shifts</h2>`;
