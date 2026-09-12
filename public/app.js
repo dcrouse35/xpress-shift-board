@@ -6,6 +6,9 @@ const WEEKDAY_NAMES = {0:'Sunday',1:'Monday',2:'Tuesday',3:'Wednesday',4:'Thursd
 let employees = [];
 let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } } — date-specific overrides (approved time off lands here)
 let weeklyAvailability = {}; // { employeeId: { 0..6: state } } — the recurring weekly pattern staff set once, keyed by day of week
+let weeklyAvailabilityLocked = false; // true Mon 9pm through the following Mon 9pm (business time) — set from the server, never computed client-side
+let availabilityLog = []; // [ {id, employeeId, day, previousState, newState, changedAt} ] — admin/supervisor only
+let weeklyAvailError = null;
 let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, end, draft, open?, positionId?} ]
 let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
 let ptoRequests = []; // [ {id, employeeId, startDate, endDate, reason, status, createdAt} ]
@@ -129,6 +132,7 @@ async function loadProtectedData(){
   employees = empRes.employees;
   availability = availRes.availability;
   weeklyAvailability = weeklyAvailRes.weeklyAvailability;
+  weeklyAvailabilityLocked = weeklyAvailRes.locked;
   shifts = shiftRes.shifts;
   swapRequests = swapRes.swaps;
   ptoRequests = ptoRes.requests;
@@ -136,9 +140,10 @@ async function loadProtectedData(){
   groups = groupRes.groups;
 
   if(isScheduler()){
-    const [wageRes, tmplRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates') ]);
+    const [wageRes, tmplRes, logRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates'), api('/api/availability-log') ]);
     wages = wageRes.wages;
     shiftTemplates = tmplRes.templates;
+    availabilityLog = logRes.log;
     await loadTimesheets();
   }
   if(isFullAdmin()){
@@ -168,7 +173,8 @@ async function setWeekdayState(empId, day, newState){
     if(!weeklyAvailability[empId]) weeklyAvailability[empId] = {};
     if(newState===null) delete weeklyAvailability[empId][day];
     else weeklyAvailability[empId][day] = newState;
-  }catch(e){ loadError = e.message; }
+    weeklyAvailError = null;
+  }catch(e){ weeklyAvailError = e.message; }
   render();
 }
 
@@ -222,7 +228,7 @@ async function loginEmployee(email, password){
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
-  employees = []; availability = {}; weeklyAvailability = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
+  employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
   wages = {}; shiftTemplates = []; timeEntries = []; clockStatus = null; admins = [];
   render();
 }
@@ -1000,16 +1006,18 @@ function renderMySchedule(emp){
   </div>`;
 
   const pattern = weeklyAvailability[emp.id] || {};
+  if(weeklyAvailError) html += `<div class="err">${weeklyAvailError}</div>`;
   html += `<div class="card">
     <h2>Your weekly availability</h2>
-    <p class="empty" style="padding:0 0 8px;">This applies every week, not just this one. Need a specific day off? Use the Time Off tab instead.</p>`;
+    <p class="empty" style="padding:0 0 8px;">This applies every week, not just this one. Need a specific day off? Use the Time Off tab instead.</p>
+    ${weeklyAvailabilityLocked ? `<p class="empty" style="padding:0 0 8px;color:var(--stop);font-weight:700;">Locked until Monday — you can update this again then. Need an exception before that? Submit a time-off request.</p>` : ''}`;
   WEEKDAY_ORDER.forEach(day=>{
     const state = pattern[day] || null;
     const cls = state ? state : '';
     const label = state ? STATE_LABEL[state] : 'Tap to set';
     html += `<div class="daytile">
       <div class="dinfo"><div class="dname">${WEEKDAY_NAMES[day]}</div></div>
-      <button class="statebtn ${cls}" data-action="toggleweekday" data-day="${day}">${icon(state)}<span>${label}</span></button>
+      <button class="statebtn ${cls}" data-action="toggleweekday" data-day="${day}" ${weeklyAvailabilityLocked?'disabled':''}>${icon(state)}<span>${label}</span></button>
     </div>`;
   });
   html += `</div>`;
@@ -1712,9 +1720,27 @@ function renderManagerView(){
     }
   }
 
+  html += renderAvailabilityLog();
   html += renderStaffDirectory(emps);
 
   return html;
+}
+
+function renderAvailabilityLog(){
+  if(!availabilityLog.length) return '';
+  const rows = availabilityLog.slice(0, 30).map(entry=>{
+    const emp = employees.find(e=>e.id===entry.employeeId);
+    const name = emp ? emp.name : '(removed)';
+    const from = entry.previousState ? STATE_LABEL[entry.previousState] : 'Not set';
+    const to = entry.newState ? STATE_LABEL[entry.newState] : 'Not set';
+    const when = new Date(entry.changedAt).toLocaleString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+    return `<div class="summaryline"><span>${name} — ${WEEKDAY_NAMES[entry.day]}: ${from} → ${to}</span><span class="empty" style="padding:0;white-space:nowrap;">${when}</span></div>`;
+  }).join('');
+  return `<div class="card">
+    <h2>Recent availability changes</h2>
+    <p class="empty" style="padding:0 0 8px;">Who changed their weekly pattern, and when.</p>
+    ${rows}
+  </div>`;
 }
 
 function renderStaffDirectory(emps){

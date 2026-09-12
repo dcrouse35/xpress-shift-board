@@ -146,6 +146,24 @@ function weekDatesFrom(weekStartISO) {
   return out;
 }
 
+// Weekly availability is open for changes Monday until 9pm business time,
+// then locked for the rest of the week — so people can't flip their pattern
+// after the schedule's already been built around it. Time-off requests
+// remain the way to handle a one-off exception any time. Computed in the
+// business's own timezone, not the server's, so it doesn't drift with
+// where this happens to be hosted.
+const BUSINESS_TIME_ZONE = 'America/New_York';
+function isAvailabilityLocked() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: BUSINESS_TIME_ZONE, weekday: 'short', hour: 'numeric', hourCycle: 'h23'
+  }).formatToParts(now);
+  const weekday = parts.find(p => p.type === 'weekday').value;
+  const hour = Number(parts.find(p => p.type === 'hour').value);
+  if (weekday !== 'Mon') return true;
+  return hour >= 21;
+}
+
 // Given a base date and a set of target JS weekdays (0=Sun..6=Sat), returns
 // the ISO dates for those weekdays in the base date's own week — plus, if
 // repeatWeeks > 0, the same set again for each of the following weeks.
@@ -486,7 +504,7 @@ app.put('/api/availability/:date', requireLogin, (req, res) => {
 // still be overridden in `availability` above; that's how an approved
 // time-off request cuts in over the usual pattern for just those days.
 app.get('/api/weekly-availability', requireAnyAuth, (req, res) => {
-  res.json({ weeklyAvailability: db.data.weeklyAvailability });
+  res.json({ weeklyAvailability: db.data.weeklyAvailability, locked: isAvailabilityLocked() });
 });
 
 app.put('/api/weekly-availability/:day', requireLogin, (req, res) => {
@@ -498,11 +516,30 @@ app.put('/api/weekly-availability/:day', requireLogin, (req, res) => {
   if (state !== null && state !== 'available' && state !== 'unavailable') {
     return res.status(400).json({ error: 'Invalid availability state.' });
   }
+  // Someone still finishing signup needs to be able to set their pattern
+  // regardless of the day/time — the lock only applies once they're in.
+  if (req.employee.onboarded && isAvailabilityLocked()) {
+    return res.status(403).json({ error: 'Weekly availability is locked until Monday. Need an exception this week? Submit a time-off request instead.' });
+  }
+  const previousState = (db.data.weeklyAvailability[req.employee.id] || {})[day] || null;
   if (!db.data.weeklyAvailability[req.employee.id]) db.data.weeklyAvailability[req.employee.id] = {};
   if (state === null) delete db.data.weeklyAvailability[req.employee.id][day];
   else db.data.weeklyAvailability[req.employee.id][day] = state;
+
+  db.data.availabilityChangeLog.push({
+    id: uid('avlog'), employeeId: req.employee.id, day, previousState, newState: state,
+    changedAt: new Date().toISOString()
+  });
+  if (db.data.availabilityChangeLog.length > 2000) {
+    db.data.availabilityChangeLog.splice(0, db.data.availabilityChangeLog.length - 2000);
+  }
+
   db.persist();
   res.json({ weeklyAvailability: db.data.weeklyAvailability[req.employee.id] || {} });
+});
+
+app.get('/api/availability-log', requireScheduler, (req, res) => {
+  res.json({ log: db.data.availabilityChangeLog.slice(-100).reverse() });
 });
 
 // ---------- shifts ----------
