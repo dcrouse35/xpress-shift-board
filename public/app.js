@@ -1,4 +1,4 @@
-const { LOTS, EMP_HOME_TAGS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS } = window.APP_CONSTANTS;
+const { LOTS, EMP_HOME_TAGS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS, WEEKLY_OVERTIME_HOURS, shiftHours, rangesOverlap } = window.APP_CONSTANTS;
 
 let employees = [];
 let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } }
@@ -6,12 +6,18 @@ let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, 
 let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
 let ptoRequests = []; // [ {id, employeeId, startDate, endDate, reason, status, createdAt} ]
 let positions = []; // [ {id, name, color} ]
+let wages = {}; // { employeeId: hourlyWage } — admin/supervisor only
+let shiftTemplates = []; // [ {id, label, start, end} ]
+let timeEntries = []; // [ {id, employeeId, date, clockIn, clockOut} ] — current timesheets week
+let clockStatus = null; // staff's own open time-clock entry, or null
 
 let me = null;    // logged-in staff identity (sanitized), or null
 let admin = null; // logged-in admin identity (sanitized), or null
+let admins = [];  // team access list (full admin only)
 let authView = 'staff'; // which gate form shows when nobody is logged in: 'staff' | 'admin'
+let adminSignupRole = 'admin'; // role picked on the admin signup form
 let staffTab = 'my';     // 'my' | 'schedule' | 'timeoff'
-let adminTab = 'schedule'; // 'schedule' | 'staff' | 'timeoff'
+let adminTab = 'schedule'; // 'schedule' | 'staff' | 'timeoff' | 'timesheets'
 
 let managerLot = '__ALL__';
 let scheduleEditor = null; // { type:'slot', date, lot, slotId, start, end } | { type:'shift', shiftId } | { type:'newcustom', employeeId, date }
@@ -22,6 +28,11 @@ let adminSignupError = null;
 let adminLoginError = null;
 let importResultMsg = null;
 let positionError = null;
+let templateError = null;
+let timesheetError = null;
+let teamError = null;
+let clockError = null;
+let editingTimesheetId = null;
 let weekOffset = 0; // 0 = this week
 let openDayKey = null; // for admin breakdown panel
 let loaded = false;
@@ -94,6 +105,9 @@ async function loadAll(){
   render();
 }
 
+function isFullAdmin(){ return !!admin && admin.role !== 'supervisor'; }
+function isScheduler(){ return !!admin; } // admin or supervisor
+
 async function loadProtectedData(){
   const [empRes, availRes, shiftRes, swapRes, ptoRes, posRes] = await Promise.all([
     api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto'), api('/api/positions')
@@ -104,11 +118,32 @@ async function loadProtectedData(){
   swapRequests = swapRes.swaps;
   ptoRequests = ptoRes.requests;
   positions = posRes.positions;
+
+  if(isScheduler()){
+    const [wageRes, tmplRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates') ]);
+    wages = wageRes.wages;
+    shiftTemplates = tmplRes.templates;
+    await loadTimesheets();
+  }
+  if(isFullAdmin()){
+    const adminsRes = await api('/api/admins');
+    admins = adminsRes.admins;
+  }
+  if(me){
+    const csRes = await api('/api/timeclock/status');
+    clockStatus = csRes.entry;
+  }
 }
 
 async function refreshShifts(){
   const sres = await api('/api/shifts');
   shifts = sres.shifts;
+}
+
+async function loadTimesheets(){
+  const weekStart = toISO(getWeekDates(weekOffset)[0]);
+  const res = await api('/api/timesheets?weekStart=' + encodeURIComponent(weekStart));
+  timeEntries = res.entries;
 }
 
 async function setDayState(empId, dateISO, newState){
@@ -162,13 +197,14 @@ async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
   employees = []; availability = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = [];
+  wages = {}; shiftTemplates = []; timeEntries = []; clockStatus = null; admins = [];
   render();
 }
 
 // ---------- admin auth ----------
-async function adminSignup(name, email, password, passwordConfirm, inviteCode){
+async function adminSignup(name, email, password, passwordConfirm, inviteCode, role){
   try{
-    const res = await api('/api/admin/signup', { method:'POST', body: JSON.stringify({name,email,password,passwordConfirm,inviteCode}) });
+    const res = await api('/api/admin/signup', { method:'POST', body: JSON.stringify({name,email,password,passwordConfirm,inviteCode,role}) });
     admin = res.admin;
     me = null;
     adminSignupError = null;
@@ -219,8 +255,10 @@ async function updateMyInfo(){
 async function updateStaffField(empId, field, value){
   try{
     const res = await api(`/api/employees/${empId}`, { method:'PATCH', body: JSON.stringify({ [field]: value }) });
+    if(res.employee.hourlyWage !== undefined) wages[empId] = res.employee.hourlyWage;
+    const { hourlyWage, ...sanitized } = res.employee;
     const idx = employees.findIndex(e=>e.id===empId);
-    if(idx>=0) employees[idx] = res.employee;
+    if(idx>=0) employees[idx] = sanitized;
   }catch(e){ loadError = e.message; }
   render();
 }
@@ -326,6 +364,97 @@ async function claimShift(shiftId){
     if(idx>=0) shifts[idx] = res.shift;
     swapError = null;
   }catch(e){ swapError = e.message; }
+  render();
+}
+
+// ---------- time clock ----------
+async function clockIn(){
+  try{
+    const res = await api('/api/timeclock/in', { method:'POST' });
+    clockStatus = res.entry;
+    clockError = null;
+  }catch(e){ clockError = e.message; }
+  render();
+}
+async function clockOut(){
+  try{
+    await api('/api/timeclock/out', { method:'POST' });
+    clockStatus = null;
+    clockError = null;
+  }catch(e){ clockError = e.message; }
+  render();
+}
+function entryHours(t){
+  const end = t.clockOut ? new Date(t.clockOut).getTime() : Date.now();
+  return (end - new Date(t.clockIn).getTime()) / 3600000;
+}
+
+// ---------- timesheets (admin/supervisor) ----------
+async function addTimesheetEntry(){
+  const empSel = document.getElementById('newTsEmployee');
+  const dateSel = document.getElementById('newTsDate');
+  const inInput = document.getElementById('newTsIn');
+  const outInput = document.getElementById('newTsOut');
+  const employeeId = empSel ? empSel.value : '';
+  const date = dateSel ? dateSel.value : '';
+  const clockInVal = inInput ? inInput.value : '';
+  const clockOutVal = outInput ? outInput.value : '';
+  if(!employeeId || !date || !clockInVal){ timesheetError = "Pick a person, date, and clock-in time."; render(); return; }
+  try{
+    const res = await api('/api/timesheets', { method:'POST', body: JSON.stringify({ employeeId, date, clockIn: clockInVal, clockOut: clockOutVal || null }) });
+    timeEntries.push(res.entry);
+    timesheetError = null;
+  }catch(e){ timesheetError = e.message; }
+  render();
+}
+async function updateTimesheetEntry(id, field, value){
+  try{
+    const res = await api(`/api/timesheets/${id}`, { method:'PATCH', body: JSON.stringify({ [field]: value }) });
+    const idx = timeEntries.findIndex(t=>t.id===id);
+    if(idx>=0) timeEntries[idx] = res.entry;
+  }catch(e){ timesheetError = e.message; }
+  render();
+}
+async function deleteTimesheetEntry(id){
+  try{
+    await api(`/api/timesheets/${id}`, { method:'DELETE' });
+    timeEntries = timeEntries.filter(t=>t.id!==id);
+    editingTimesheetId = null;
+  }catch(e){ timesheetError = e.message; }
+  render();
+}
+
+// ---------- shift templates ----------
+async function addShiftTemplate(){
+  const labelInput = document.getElementById('newTemplateLabel');
+  const startInput = document.getElementById('newTemplateStart');
+  const endInput = document.getElementById('newTemplateEnd');
+  const label = labelInput ? labelInput.value.trim() : '';
+  const start = startInput ? startInput.value : '';
+  const end = endInput ? endInput.value : '';
+  if(!label || !start || !end){ templateError = "Fill in a name, start, and end time."; render(); return; }
+  try{
+    const res = await api('/api/shift-templates', { method:'POST', body: JSON.stringify({ label, start, end }) });
+    shiftTemplates.push(res.template);
+    templateError = null;
+  }catch(e){ templateError = e.message; }
+  render();
+}
+async function removeShiftTemplate(id){
+  try{
+    await api(`/api/shift-templates/${id}`, { method:'DELETE' });
+    shiftTemplates = shiftTemplates.filter(t=>t.id!==id);
+  }catch(e){ templateError = e.message; }
+  render();
+}
+
+// ---------- team access ----------
+async function removeAdminAccount(id){
+  if(!confirm('Remove this account? They will no longer be able to log in.')) return;
+  try{
+    await api(`/api/admins/${id}`, { method:'DELETE' });
+    admins = admins.filter(a=>a.id!==id);
+  }catch(e){ teamError = e.message; }
   render();
 }
 
@@ -646,9 +775,14 @@ function renderGate(){
       <input type="password" id="adminPassword" placeholder="6+ characters" />
       <label style="margin-top:10px;">Confirm password</label>
       <input type="password" id="adminPasswordConfirm" />
+      <label style="margin-top:10px;">Account type</label>
+      <select id="adminRole">
+        <option value="admin" ${adminSignupRole==='admin'?'selected':''}>Admin — full access</option>
+        <option value="supervisor" ${adminSignupRole==='supervisor'?'selected':''}>Supervisor — can build the schedule only</option>
+      </select>
       <label style="margin-top:10px;">Invite code</label>
       <input type="password" id="adminInviteCode" />
-      <button class="primary" style="width:100%;margin-top:12px;" id="adminSignupBtn">Create admin account</button>
+      <button class="primary" style="width:100%;margin-top:12px;" id="adminSignupBtn">Create account</button>
     </div>`;
   }
 
@@ -716,8 +850,29 @@ function renderOnboarding(emp){
   return html;
 }
 
+function renderTimeClockCard(){
+  let html = '';
+  if(clockError) html += `<div class="err">${clockError}</div>`;
+  if(clockStatus){
+    const since = new Date(clockStatus.clockIn);
+    const fmtTime = since.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+    html += `<div class="card" style="background:var(--go-bg);border-color:var(--go);">
+      <div class="row" style="justify-content:space-between;">
+        <span style="font-weight:800;color:var(--go);">Clocked in since ${fmtTime}</span>
+        <button class="danger" data-action="clockout">Clock out</button>
+      </div>
+    </div>`;
+  } else {
+    html += `<div class="card">
+      <button class="primary" style="width:100%;" data-action="clockin">Clock in</button>
+    </div>`;
+  }
+  return html;
+}
+
 function renderMySchedule(emp){
   let html = '';
+  html += renderTimeClockCard();
   if(signupError) html += `<div class="err">${signupError}</div>`;
   if(swapError) html += `<div class="err">${swapError}</div>`;
 
@@ -885,22 +1040,26 @@ function renderTimeOffStaff(emp){
 
 // ================= ADMIN APP =================
 function renderAdminApp(){
+  const fullAdmin = isFullAdmin();
   let html = `<div class="card" style="background:var(--brand-bg);border-color:var(--brand);">
     <div class="row" style="justify-content:space-between;">
-      <span style="font-weight:800;color:var(--brand);">Admin: ${admin.name}</span>
+      <span style="font-weight:800;color:var(--brand);">${fullAdmin?'Admin':'Supervisor'}: ${admin.name}</span>
       <button class="ghost" data-action="logout">Log out</button>
     </div>
   </div>`;
 
   html += `<div class="tabs">
     <button class="tab ${adminTab==='schedule'?'active':''}" data-action="setadmintab" data-tab="schedule">Schedule</button>
-    <button class="tab ${adminTab==='staff'?'active':''}" data-action="setadmintab" data-tab="staff">Staff &amp; Availability</button>
-    <button class="tab ${adminTab==='timeoff'?'active':''}" data-action="setadmintab" data-tab="timeoff">Time Off</button>
+    ${fullAdmin ? `<button class="tab ${adminTab==='staff'?'active':''}" data-action="setadmintab" data-tab="staff">Staff &amp; Availability</button>` : ''}
+    ${fullAdmin ? `<button class="tab ${adminTab==='timeoff'?'active':''}" data-action="setadmintab" data-tab="timeoff">Time Off</button>` : ''}
+    <button class="tab ${adminTab==='timesheets'?'active':''}" data-action="setadmintab" data-tab="timesheets">Timesheets</button>
   </div>`;
 
   if(adminTab==='schedule') html += renderScheduleView({ readOnly:false });
-  else if(adminTab==='staff') html += renderManagerView();
-  else html += renderTimeOffAdmin();
+  else if(adminTab==='staff' && fullAdmin) html += renderManagerView();
+  else if(adminTab==='timeoff' && fullAdmin) html += renderTimeOffAdmin();
+  else if(adminTab==='timesheets') html += renderTimesheets();
+  else html += renderScheduleView({ readOnly:false });
 
   return html;
 }
@@ -940,6 +1099,104 @@ function renderTimeOffAdmin(){
     }).join('');
   }
   html += `</div>`;
+
+  return html;
+}
+
+function renderTimesheets(){
+  let html = '';
+  if(timesheetError) html += `<div class="err">${timesheetError}</div>`;
+  const dates = getWeekDates(weekOffset);
+  const weekIso = dates.map(toISO);
+  const fullAdmin = isFullAdmin();
+
+  html += `<div class="card">
+    <div class="weeknav">
+      <button data-action="week" data-dir="-1">‹</button>
+      <div class="label">${fmtWeekLabel(dates)}</div>
+      <button data-action="week" data-dir="1">›</button>
+    </div>
+  </div>`;
+
+  const byEmp = {};
+  timeEntries.forEach(t=>{ if(!byEmp[t.employeeId]) byEmp[t.employeeId] = []; byEmp[t.employeeId].push(t); });
+  const empIds = Object.keys(byEmp).sort((a,b)=>{
+    const ea = employees.find(e=>e.id===a), eb = employees.find(e=>e.id===b);
+    return (ea?ea.name:'').localeCompare(eb?eb.name:'');
+  });
+
+  html += `<div class="card"><h2>Hours this week</h2>`;
+  if(!empIds.length){
+    html += `<p class="empty">No clock-in activity yet this week.</p>`;
+  } else {
+    html += `<div style="overflow-x:auto;"><table class="schedtable"><thead><tr><th style="text-align:left;">Staff</th>`;
+    dates.forEach(d=> html += `<th>${d.toLocaleDateString('en-US',{weekday:'short'})}<br>${d.getDate()}</th>`);
+    html += `<th>Total</th></tr></thead><tbody>`;
+    empIds.forEach(empId=>{
+      const emp = employees.find(e=>e.id===empId);
+      const entries = byEmp[empId];
+      let weekTotal = 0;
+      html += `<tr><td class="namecell">${emp?emp.name:'(removed)'}</td>`;
+      dates.forEach(d=>{
+        const iso = toISO(d);
+        const hrs = entries.filter(t=>t.date===iso).reduce((n,t)=> n + entryHours(t), 0);
+        weekTotal += hrs;
+        html += `<td>${hrs>0 ? hrs.toFixed(1) : '—'}</td>`;
+      });
+      html += `<td style="font-weight:800;">${weekTotal.toFixed(1)}</td></tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+  html += `</div>`;
+
+  html += `<div class="card"><h2>Entries</h2>`;
+  const weekEntries = timeEntries.filter(t=>weekIso.includes(t.date))
+                                  .sort((a,b)=> a.date===b.date ? a.clockIn.localeCompare(b.clockIn) : a.date.localeCompare(b.date));
+  if(!weekEntries.length){
+    html += `<p class="empty">Nothing recorded yet.</p>`;
+  } else {
+    const fmtTime = d => d.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+    html += weekEntries.map(t=>{
+      const emp = employees.find(e=>e.id===t.employeeId);
+      const inTime = new Date(t.clockIn);
+      const outTime = t.clockOut ? new Date(t.clockOut) : null;
+      if(fullAdmin && editingTimesheetId===t.id){
+        return `<div class="staffcard">
+          <div style="font-weight:700;margin-bottom:8px;">${emp?emp.name:'(removed)'} · ${fmtDateShort(t.date)}</div>
+          <div class="trow" style="display:flex;gap:8px;">
+            <input type="time" value="${pad(inTime.getHours())}:${pad(inTime.getMinutes())}" data-action="tsedit" data-field="clockIn" data-id="${t.id}" />
+            <input type="time" value="${outTime?pad(outTime.getHours())+':'+pad(outTime.getMinutes()):''}" data-action="tsedit" data-field="clockOut" data-id="${t.id}" />
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <button class="ghost" style="flex:1;" data-action="closetsedit">Done</button>
+            <button class="danger" style="flex:1;" data-action="deletets" data-id="${t.id}">Delete</button>
+          </div>
+        </div>`;
+      }
+      return `<div class="summaryline" ${fullAdmin?`data-action="opentsedit" data-id="${t.id}" style="cursor:pointer;"`:''}>
+        <span>${emp?emp.name:'(removed)'} · ${fmtDateShort(t.date)}</span>
+        <span>${fmtTime(inTime)} – ${outTime?fmtTime(outTime):'still clocked in'} (${entryHours(t).toFixed(1)}h)</span>
+      </div>`;
+    }).join('');
+  }
+  html += `</div>`;
+
+  if(fullAdmin){
+    const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+    html += `<div class="card">
+      <h2>Add a manual entry</h2>
+      <label>Staff member</label>
+      <select id="newTsEmployee">${sortedEmps.map(e=>`<option value="${e.id}">${e.name}</option>`).join('')}</select>
+      <label style="margin-top:10px;">Date</label>
+      <select id="newTsDate">${dates.map(d=>`<option value="${toISO(d)}">${fmtDayName(d)}, ${fmtDayShort(d)}</option>`).join('')}</select>
+      <label style="margin-top:10px;">Time</label>
+      <div class="trow" style="display:flex;gap:8px;">
+        <input type="time" id="newTsIn" value="09:00" />
+        <input type="time" id="newTsOut" value="17:00" />
+      </div>
+      <button class="primary" style="width:100%;margin-top:12px;" data-action="addtimesheet">Add entry</button>
+    </div>`;
+  }
 
   return html;
 }
@@ -986,24 +1243,61 @@ function buildScheduleRows(dates, filterEmps){
       const bs = b.kind==='slot' ? b.start : b.shift.start;
       return as.localeCompare(bs);
     });
+    // flag overlapping blocks within the same cell (double-booked that day) —
+    // only meaningful for an actual person's row, never the Open Shifts
+    // holding row where many different unfilled positions naturally overlap.
+    const blocks = cells[k];
+    blocks.forEach(b=>{ b.conflict = false; });
+    if(k.startsWith('OPEN|')) return;
+    for(let i=0;i<blocks.length;i++){
+      for(let j=i+1;j<blocks.length;j++){
+        const A = blocks[i], B = blocks[j];
+        const as = A.kind==='slot'?A.start:A.shift.start, ae = A.kind==='slot'?A.end:A.shift.end;
+        const bs = B.kind==='slot'?B.start:B.shift.start, be = B.kind==='slot'?B.end:B.shift.end;
+        if(rangesOverlap(as, ae, bs, be)){ A.conflict = true; B.conflict = true; }
+      }
+    }
+  });
+
+  // weekly scheduled hours per row key (for overtime warnings) and cost per employee
+  const weeklyHours = {};
+  let totalCost = 0;
+  Object.keys(cells).forEach(k=>{
+    const key = k.split('|')[0];
+    if(key==='OPEN') return;
+    cells[k].forEach(b=>{
+      const start = b.kind==='slot' ? b.start : b.shift.start;
+      const end = b.kind==='slot' ? b.end : b.shift.end;
+      const hrs = shiftHours(start, end);
+      weeklyHours[key] = (weeklyHours[key]||0) + hrs;
+      totalCost += hrs * (wages[key] || 0);
+    });
   });
 
   const rowKeys = [{key:'OPEN', label:'Open Shifts'}].concat(
-    filterEmps.map(e=>({key:e.id, label:e.name}))
+    filterEmps.map(e=>({key:e.id, label:e.name, hours:weeklyHours[e.id]||0}))
   );
 
-  return { cells, rowKeys };
+  return { cells, rowKeys, totalCost };
 }
 
 function renderEmployeeGrid(dates, readOnly, filterEmps){
-  const { cells, rowKeys } = buildScheduleRows(dates, filterEmps);
+  const { cells, rowKeys, totalCost } = buildScheduleRows(dates, filterEmps);
+  const showCost = isScheduler() && !readOnly;
 
-  let html = `<div class="schedgrid-wrap"><table class="schedgrid"><thead><tr><th class="schedgrid-namecol"></th>`;
+  let html = '';
+  if(showCost){
+    html += `<div class="row" style="justify-content:flex-end;margin-bottom:8px;">
+      <span class="tag unset" style="font-size:12.5px;">Estimated labor cost: $${totalCost.toFixed(2)}</span>
+    </div>`;
+  }
+  html += `<div class="schedgrid-wrap"><table class="schedgrid"><thead><tr><th class="schedgrid-namecol"></th>`;
   dates.forEach(d=> html += `<th>${d.toLocaleDateString('en-US',{weekday:'short'})}<span class="sub">${fmtDayShort(d)}</span></th>`);
   html += `</tr></thead><tbody>`;
 
   rowKeys.forEach(row=>{
-    html += `<tr><td class="schedgrid-namecol${row.key==='OPEN'?' schedgrid-openrow':''}">${row.label}</td>`;
+    const overtime = row.hours > WEEKLY_OVERTIME_HOURS;
+    html += `<tr><td class="schedgrid-namecol${row.key==='OPEN'?' schedgrid-openrow':''}">${row.label}${overtime?` <span class="tag unavailable" title="Over ${WEEKLY_OVERTIME_HOURS}h this week">⚠ ${row.hours.toFixed(1)}h</span>`:''}</td>`;
     dates.forEach(d=>{
       const iso = toISO(d);
       const blocks = cells[row.key+'|'+iso] || [];
@@ -1012,12 +1306,13 @@ function renderEmployeeGrid(dates, readOnly, filterEmps){
         const timeStr = b.kind==='slot' ? `${fmt12(b.start)}–${fmt12(b.end)}` : `${fmt12(b.shift.start)}–${fmt12(b.shift.end)}`;
         const draft = b.kind==='slot' ? (b.shift && b.shift.draft) : b.shift.draft;
         const openTag = (b.kind==='custom' && b.shift.open && !getShiftEmployeeIds(b.shift).length) ? ' <span class="tag unset">OPEN</span>' : '';
+        const conflictTag = b.conflict ? ' <span class="tag unavailable" title="Overlaps another shift this day">⚠</span>' : '';
         const colorStyle = b.color ? `border-left-color:${b.color};background:${b.color}1A;` : '';
         const action = readOnly ? '' : (b.kind==='slot'
           ? `data-action="openslot" data-date="${b.date}" data-lot="${b.lot}" data-slotid="${b.slotId}" data-start="${b.start}" data-end="${b.end}"`
           : `data-action="openshift" data-shiftid="${b.shift.id}"`);
         html += `<div class="schedchip" ${action} style="${colorStyle}${readOnly?'':'cursor:pointer;'}">
-          <div class="schedchip-label">${b.label}${openTag}</div>
+          <div class="schedchip-label">${b.label}${openTag}${conflictTag}</div>
           <div class="schedchip-time">${timeStr}${draft?' · Draft':''}</div>
         </div>`;
       });
@@ -1106,6 +1401,11 @@ function renderNewCustomEditor(ed){
     <div id="newCustomLocationWrap" style="display:none;margin-top:8px;">
       <input type="text" id="newCustomCustomLocation" placeholder="Type the location name" />
     </div>
+    ${shiftTemplates.length ? `<label style="margin-top:10px;">Use a saved template (optional)</label>
+    <select id="newCustomTemplate">
+      <option value="">— Type times manually —</option>
+      ${shiftTemplates.map(t=>`<option value="${t.id}">${t.label} (${fmt12(t.start)}–${fmt12(t.end)})</option>`).join('')}
+    </select>` : ''}
     <label style="margin-top:10px;">Time</label>
     <div class="trow" style="display:flex;gap:8px;">
       <input type="time" id="newCustomStart" value="09:00" />
@@ -1176,6 +1476,26 @@ function renderScheduleView(opts){
     <button class="primary" style="width:100%;margin-top:10px;" data-action="publishweek" ${draftCount===0?'disabled':''}>Publish week</button>
   </div>`;
 
+  if(templateError) html += `<div class="err">${templateError}</div>`;
+  html += `<div class="card">
+    <h2>Shift Templates</h2>
+    <p class="empty" style="padding:0 0 10px;">Saved time presets you can pick from when adding a shift, instead of typing start/end every time.</p>
+    ${shiftTemplates.length ? shiftTemplates.map(t=>`
+      <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+        <span>${t.label} <span class="empty" style="padding:0;">(${fmt12(t.start)}–${fmt12(t.end)})</span></span>
+        <button class="danger" data-action="removetemplate" data-id="${t.id}">Remove</button>
+      </div>
+    `).join('') : '<p class="empty" style="padding:0 0 10px;">No templates saved yet.</p>'}
+    <label style="margin-top:12px;">Name</label>
+    <input type="text" id="newTemplateLabel" placeholder="e.g. Morning" />
+    <label style="margin-top:10px;">Time</label>
+    <div class="trow" style="display:flex;gap:8px;">
+      <input type="time" id="newTemplateStart" value="08:00" />
+      <input type="time" id="newTemplateEnd" value="16:00" />
+    </div>
+    <button class="primary" style="width:100%;margin-top:12px;" data-action="addtemplate">Save template</button>
+  </div>`;
+
   if(scheduleEditor){
     if(scheduleEditor.type==='slot') html += renderSlotEditor(scheduleEditor);
     else if(scheduleEditor.type==='shift'){
@@ -1190,6 +1510,19 @@ function renderScheduleView(opts){
 
 function renderManagerView(){
   let html = '';
+
+  if(teamError) html += `<div class="err">${teamError}</div>`;
+  html += `<div class="card">
+    <h2>Team Access</h2>
+    <p class="empty" style="padding:0 0 10px;">Admin and supervisor accounts that can log in to manage this board.</p>
+    ${admins.map(a=>`
+      <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+        <span>${a.name} <span class="empty" style="padding:0;">(${a.email}) · ${a.role==='supervisor'?'Supervisor':'Admin'}</span></span>
+        ${a.id!==admin.id ? `<button class="danger" data-action="removeadmin" data-id="${a.id}">Remove</button>` : `<span class="empty" style="padding:0;">You</span>`}
+      </div>
+    `).join('')}
+    <p class="empty" style="padding-top:10px;">To add someone, have them use the "Admin" sign-up on the login screen with your invite code.</p>
+  </div>`;
 
   if(importResultMsg){
     html += `<div class="card" style="background:var(--go-bg);border-color:var(--go);">
@@ -1306,6 +1639,10 @@ function renderStaffDirectory(emps){
             ${EMP_HOME_TAGS.map(l=>`<option value="${l}" ${emp.lot===l?'selected':''}>${l}</option>`).join('')}
           </select>
           <select data-action="staffedit" data-id="${emp.id}" data-field="defaultPositionId">${positionOptionsHtml(emp.defaultPositionId)}</select>
+          <div class="field" style="margin-top:0;grid-column:1 / -1;">
+            <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--ink-muted);font-size:14px;">$</span>
+            <input type="number" min="0" step="0.25" placeholder="Hourly wage" style="padding-left:26px;" value="${wages[emp.id]||''}" data-action="staffedit" data-id="${emp.id}" data-field="hourlyWage" />
+          </div>
         </div>
         <div class="staffcard-status">${emp.onboarded ? 'Signed up' : 'Not signed up yet'}</div>
       </div>
@@ -1359,8 +1696,11 @@ function bindEvents(){
     const password = app.querySelector('#adminPassword').value;
     const passwordConfirm = app.querySelector('#adminPasswordConfirm').value;
     const inviteCode = app.querySelector('#adminInviteCode').value;
-    adminSignup(name, email, password, passwordConfirm, inviteCode);
+    const role = app.querySelector('#adminRole').value;
+    adminSignup(name, email, password, passwordConfirm, inviteCode, role);
   };
+  const adminRoleSelect = app.querySelector('#adminRole');
+  if(adminRoleSelect) adminRoleSelect.onchange = ()=>{ adminSignupRole = adminRoleSelect.value; };
 
   app.querySelectorAll('[data-action="logout"]').forEach(b=> b.onclick = ()=> logoutEmployee());
   app.querySelectorAll('[data-action="saveinfo"]').forEach(b=> b.onclick = ()=> updateMyInfo());
@@ -1430,6 +1770,31 @@ function bindEvents(){
     const wrap = app.querySelector('#newCustomLocationWrap');
     if(wrap) wrap.style.display = newCustomLocation.value === '__CUSTOM__' ? 'block' : 'none';
   };
+  const newCustomTemplate = app.querySelector('#newCustomTemplate');
+  if(newCustomTemplate) newCustomTemplate.onchange = ()=>{
+    const t = shiftTemplates.find(x=>x.id===newCustomTemplate.value);
+    if(!t) return;
+    const startInput = app.querySelector('#newCustomStart');
+    const endInput = app.querySelector('#newCustomEnd');
+    if(startInput) startInput.value = t.start;
+    if(endInput) endInput.value = t.end;
+  };
+
+  app.querySelectorAll('[data-action="clockin"]').forEach(b=> b.onclick = ()=> clockIn());
+  app.querySelectorAll('[data-action="clockout"]').forEach(b=> b.onclick = ()=> clockOut());
+
+  app.querySelectorAll('[data-action="addtemplate"]').forEach(b=> b.onclick = ()=> addShiftTemplate());
+  app.querySelectorAll('[data-action="removetemplate"]').forEach(b=> b.onclick = ()=> removeShiftTemplate(b.dataset.id));
+
+  app.querySelectorAll('[data-action="removeadmin"]').forEach(b=> b.onclick = ()=> removeAdminAccount(b.dataset.id));
+
+  app.querySelectorAll('[data-action="addtimesheet"]').forEach(b=> b.onclick = ()=> addTimesheetEntry());
+  app.querySelectorAll('[data-action="opentsedit"]').forEach(el=> el.onclick = ()=>{ editingTimesheetId = el.dataset.id; render(); });
+  app.querySelectorAll('[data-action="closetsedit"]').forEach(b=> b.onclick = ()=>{ editingTimesheetId = null; render(); });
+  app.querySelectorAll('[data-action="deletets"]').forEach(b=> b.onclick = ()=> deleteTimesheetEntry(b.dataset.id));
+  app.querySelectorAll('[data-action="tsedit"]').forEach(inp=> inp.onchange = ()=>{
+    updateTimesheetEntry(inp.dataset.id, inp.dataset.field, inp.value || null);
+  });
 
   app.querySelectorAll('[data-action="deleteshift"]').forEach(b=> b.onclick = ()=>{
     deleteShift(b.dataset.shiftid);
@@ -1453,11 +1818,15 @@ function bindEvents(){
     removeShiftAssignee(b.dataset.shiftid, b.dataset.empid);
   });
 
-  app.querySelectorAll('[data-action="week"]').forEach(b=> b.onclick = ()=>{
+  app.querySelectorAll('[data-action="week"]').forEach(b=> b.onclick = async ()=>{
     weekOffset += parseInt(b.dataset.dir,10);
     openDayKey = null;
     scheduleEditor = null;
     render();
+    if(isScheduler()){
+      try{ await loadTimesheets(); }catch(e){ /* ignore, stale week's data just stays until next successful load */ }
+      render();
+    }
   });
 
   app.querySelectorAll('[data-action="toggleday"]').forEach(b=> b.onclick = ()=>{

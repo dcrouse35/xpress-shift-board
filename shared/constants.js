@@ -55,7 +55,28 @@
     "#7C3AED", "#0EA5A0", "#DB2777", "#4B5563", "#B45309"
   ];
 
-  const constants = { LOTS, EMP_HOME_TAGS, DEFAULT_ROSTER, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS };
+  const WEEKLY_OVERTIME_HOURS = 40;
+
+  // Shared time-math helpers (used by both server cost/overtime calculations
+  // and the client's schedule warnings) so the two never disagree.
+  function shiftHours(start, end) {
+    const [sh, sm] = start.split(':').map(Number);
+    const [eh, em] = end.split(':').map(Number);
+    let mins = (eh * 60 + em) - (sh * 60 + sm);
+    if (mins <= 0) mins += 24 * 60; // shift crosses midnight
+    return mins / 60;
+  }
+  function rangesOverlap(aStart, aEnd, bStart, bEnd) {
+    const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+    let a1 = toMin(aStart), a2 = toMin(aEnd); if (a2 <= a1) a2 += 24 * 60;
+    let b1 = toMin(bStart), b2 = toMin(bEnd); if (b2 <= b1) b2 += 24 * 60;
+    return a1 < b2 && b1 < a2;
+  }
+
+  const constants = {
+    LOTS, EMP_HOME_TAGS, DEFAULT_ROSTER, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS,
+    WEEKLY_OVERTIME_HOURS, shiftHours, rangesOverlap
+  };
 
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = constants;

@@ -63,12 +63,12 @@ body{
   .card{padding:22px 24px;}
 }
 
-select, input[type=text], input[type=password], input[type=date]{
+select, input[type=text], input[type=password], input[type=date], input[type=number]{
   width:100%;padding:12px 13px;border:1.5px solid var(--line-strong);border-radius:var(--radius-md);
   font-size:15px;font-family:var(--font);background:#FBFBFA;color:var(--ink);
   transition:border-color .15s;
 }
-select:focus, input[type=text]:focus, input[type=password]:focus, input[type=date]:focus{outline:none;border-color:var(--brand);background:#fff;}
+select:focus, input[type=text]:focus, input[type=password]:focus, input[type=date]:focus, input[type=number]:focus{outline:none;border-color:var(--brand);background:#fff;}
 input[type=checkbox]{width:16px;height:16px;flex-shrink:0;accent-color:var(--brand);}
 label{font-size:12px;font-weight:700;color:var(--ink-muted);display:block;margin-bottom:6px;}
 

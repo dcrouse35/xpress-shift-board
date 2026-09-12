@@ -42,7 +42,16 @@ function uid(prefix) {
   return (prefix || 'id') + '_' + crypto.randomBytes(6).toString('hex');
 }
 
+// Wages are sensitive — never included in the general employee list that
+// every signed-in user (including coworkers) can read.
 function publicEmployee(e) {
+  if (!e) return null;
+  const { passwordHash, hourlyWage, ...rest } = e;
+  return rest;
+}
+// Used only for responses the requesting admin/supervisor is entitled to see
+// about themselves or in a wage-aware context.
+function adminEmployee(e) {
   if (!e) return null;
   const { passwordHash, ...rest } = e;
   return rest;
@@ -73,9 +82,20 @@ function requireLogin(req, res, next) {
   next();
 }
 
+// Full admin only — role is missing on legacy accounts created before the
+// supervisor tier existed, so anything except an explicit 'supervisor' counts.
 function requireAdmin(req, res, next) {
   const admin = currentAdmin(req);
-  if (!admin) return res.status(403).json({ error: 'Admins only.' });
+  if (!admin || admin.role === 'supervisor') return res.status(403).json({ error: 'Admins only.' });
+  req.admin = admin;
+  next();
+}
+
+// Admin or supervisor — schedule-building access, but not staff-directory
+// management, time-off approval, or positions/wage editing.
+function requireScheduler(req, res, next) {
+  const admin = currentAdmin(req);
+  if (!admin) return res.status(403).json({ error: 'Admins or supervisors only.' });
   req.admin = admin;
   next();
 }
@@ -186,9 +206,10 @@ app.get('/api/me', (req, res) => {
 
 // ---------- admin auth ----------
 app.post('/api/admin/signup', (req, res) => {
-  let { name, email, password, passwordConfirm, inviteCode } = req.body || {};
+  let { name, email, password, passwordConfirm, inviteCode, role } = req.body || {};
   name = (name || '').trim();
   email = (email || '').trim();
+  role = role === 'supervisor' ? 'supervisor' : 'admin';
   const requiredCode = process.env.ADMIN_SIGNUP_CODE;
   if (!requiredCode) return res.status(503).json({ error: 'Admin sign-up is not configured on this server.' });
   if (!inviteCode || inviteCode !== requiredCode) return res.status(403).json({ error: 'Invalid invite code.' });
@@ -199,7 +220,7 @@ app.post('/api/admin/signup', (req, res) => {
   if (db.data.admins.find(a => a.email.toLowerCase() === email.toLowerCase())) {
     return res.status(400).json({ error: 'That email is already registered as an admin — log in instead.' });
   }
-  const admin = { id: uid('a'), name, email, passwordHash: bcrypt.hashSync(password, 10) };
+  const admin = { id: uid('a'), name, email, role, passwordHash: bcrypt.hashSync(password, 10) };
   db.data.admins.push(admin);
   req.session.adminId = admin.id;
   delete req.session.employeeId;
@@ -217,6 +238,17 @@ app.post('/api/admin/login', (req, res) => {
   req.session.adminId = admin.id;
   delete req.session.employeeId;
   res.json({ admin: publicAdmin(admin) });
+});
+
+app.get('/api/admins', requireAdmin, (req, res) => {
+  res.json({ admins: db.data.admins.map(publicAdmin) });
+});
+
+app.delete('/api/admins/:id', requireAdmin, (req, res) => {
+  if (req.params.id === req.admin.id) return res.status(400).json({ error: "You can't remove your own account." });
+  db.data.admins = db.data.admins.filter(a => a.id !== req.params.id);
+  db.persist();
+  res.json({ ok: true });
 });
 
 // ---------- employees ----------
@@ -248,7 +280,7 @@ app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
 app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   const emp = db.data.employees.find(e => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found.' });
-  const { name, email, phone, lot, defaultPositionId } = req.body || {};
+  const { name, email, phone, lot, defaultPositionId, hourlyWage } = req.body || {};
   if (name !== undefined) {
     if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
     emp.name = name.trim();
@@ -257,8 +289,18 @@ app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   if (phone !== undefined) emp.phone = phone.trim();
   if (lot !== undefined) emp.lot = lot;
   if (defaultPositionId !== undefined) emp.defaultPositionId = defaultPositionId || null;
+  if (hourlyWage !== undefined) {
+    const n = Number(hourlyWage);
+    emp.hourlyWage = Number.isFinite(n) && n >= 0 ? n : 0;
+  }
   db.persist();
-  res.json({ employee: publicEmployee(emp) });
+  res.json({ employee: adminEmployee(emp) });
+});
+
+app.get('/api/wages', requireScheduler, (req, res) => {
+  const wages = {};
+  db.data.employees.forEach(e => { wages[e.id] = e.hourlyWage || 0; });
+  res.json({ wages });
 });
 
 app.delete('/api/employees/:id', requireAdmin, (req, res) => {
@@ -324,6 +366,28 @@ app.delete('/api/positions/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- shift templates (saved time presets) ----------
+app.get('/api/shift-templates', requireScheduler, (req, res) => {
+  res.json({ templates: db.data.shiftTemplates });
+});
+
+app.post('/api/shift-templates', requireScheduler, (req, res) => {
+  let { label, start, end } = req.body || {};
+  label = (label || '').trim();
+  if (!label) return res.status(400).json({ error: 'Enter a name for the template.' });
+  if (!start || !end) return res.status(400).json({ error: 'Pick a start and end time.' });
+  const template = { id: uid('tmpl'), label, start, end };
+  db.data.shiftTemplates.push(template);
+  db.persist();
+  res.json({ template });
+});
+
+app.delete('/api/shift-templates/:id', requireScheduler, (req, res) => {
+  db.data.shiftTemplates = db.data.shiftTemplates.filter(t => t.id !== req.params.id);
+  db.persist();
+  res.json({ ok: true });
+});
+
 // ---------- availability ----------
 app.get('/api/availability', requireAnyAuth, (req, res) => {
   res.json({ availability: db.data.availability });
@@ -349,7 +413,7 @@ app.get('/api/shifts', requireAnyAuth, (req, res) => {
   res.json({ shifts: db.data.shifts });
 });
 
-app.post('/api/shifts', requireAdmin, (req, res) => {
+app.post('/api/shifts', requireScheduler, (req, res) => {
   const { date, lot, customName, start, end, employeeId, open, positionId, copyToWeekdays, repeatWeeks } = req.body || {};
   if (!date || !lot) return res.status(400).json({ error: 'Missing date or location.' });
   const makeShift = (d) => ({
@@ -369,7 +433,7 @@ app.post('/api/shifts', requireAdmin, (req, res) => {
   res.json({ shift, copies: extraDates.length });
 });
 
-app.post('/api/shifts/slot-assign', requireAdmin, (req, res) => {
+app.post('/api/shifts/slot-assign', requireScheduler, (req, res) => {
   const { date, lot, slotId, start, end, employeeId, positionId, copyToWeekdays, repeatWeeks } = req.body || {};
   if (!date || !lot || !slotId) return res.status(400).json({ error: 'Missing fields.' });
   const upsertFor = (d) => {
@@ -393,14 +457,14 @@ app.post('/api/shifts/slot-assign', requireAdmin, (req, res) => {
   res.json({ shift, copies: extraDates.length });
 });
 
-app.delete('/api/shifts/slot', requireAdmin, (req, res) => {
+app.delete('/api/shifts/slot', requireScheduler, (req, res) => {
   const { date, lot, slotId } = req.query;
   db.data.shifts = db.data.shifts.filter(s => !(s.date === date && s.lot === lot && s.slotId === slotId));
   db.persist();
   res.json({ ok: true });
 });
 
-app.patch('/api/shifts/:id', requireAdmin, (req, res) => {
+app.patch('/api/shifts/:id', requireScheduler, (req, res) => {
   const shift = findShift(req.params.id);
   if (!shift) return res.status(404).json({ error: 'Shift not found.' });
   const { start, end, customName, open, positionId } = req.body || {};
@@ -414,13 +478,13 @@ app.patch('/api/shifts/:id', requireAdmin, (req, res) => {
   res.json({ shift });
 });
 
-app.delete('/api/shifts/:id', requireAdmin, (req, res) => {
+app.delete('/api/shifts/:id', requireScheduler, (req, res) => {
   db.data.shifts = db.data.shifts.filter(s => s.id !== req.params.id);
   db.persist();
   res.json({ ok: true });
 });
 
-app.post('/api/shifts/:id/assignees', requireAdmin, (req, res) => {
+app.post('/api/shifts/:id/assignees', requireScheduler, (req, res) => {
   const shift = findShift(req.params.id);
   if (!shift) return res.status(404).json({ error: 'Shift not found.' });
   const employeeId = req.body && req.body.employeeId;
@@ -445,7 +509,7 @@ app.post('/api/shifts/:id/claim', requireLogin, (req, res) => {
   res.json({ shift });
 });
 
-app.delete('/api/shifts/:id/assignees/:employeeId', requireAdmin, (req, res) => {
+app.delete('/api/shifts/:id/assignees/:employeeId', requireScheduler, (req, res) => {
   const shift = findShift(req.params.id);
   if (!shift) return res.status(404).json({ error: 'Shift not found.' });
   shift.employeeIds = (shift.employeeIds || []).filter(eid => eid !== req.params.employeeId);
@@ -454,7 +518,7 @@ app.delete('/api/shifts/:id/assignees/:employeeId', requireAdmin, (req, res) => 
   res.json({ shift });
 });
 
-app.post('/api/shifts/publish', requireAdmin, (req, res) => {
+app.post('/api/shifts/publish', requireScheduler, (req, res) => {
   const weekStart = req.body && req.body.weekStart;
   if (!weekStart) return res.status(400).json({ error: 'Missing weekStart.' });
   const isoSet = new Set(weekDatesFrom(weekStart).map(toISO));
@@ -583,6 +647,71 @@ app.post('/api/pto/:id/deny', requireAdmin, (req, res) => {
   request.status = 'denied';
   db.persist();
   res.json({ request });
+});
+
+// ---------- time clock / timesheets ----------
+app.get('/api/timeclock/status', requireLogin, (req, res) => {
+  const open = db.data.timeEntries.find(t => t.employeeId === req.employee.id && !t.clockOut);
+  res.json({ entry: open || null });
+});
+
+app.post('/api/timeclock/in', requireLogin, (req, res) => {
+  const already = db.data.timeEntries.find(t => t.employeeId === req.employee.id && !t.clockOut);
+  if (already) return res.status(400).json({ error: "You're already clocked in." });
+  const now = new Date();
+  const entry = { id: uid('te'), employeeId: req.employee.id, date: toISO(now), clockIn: now.toISOString(), clockOut: null };
+  db.data.timeEntries.push(entry);
+  db.persist();
+  res.json({ entry });
+});
+
+app.post('/api/timeclock/out', requireLogin, (req, res) => {
+  const entry = db.data.timeEntries.find(t => t.employeeId === req.employee.id && !t.clockOut);
+  if (!entry) return res.status(400).json({ error: "You're not clocked in." });
+  entry.clockOut = new Date().toISOString();
+  db.persist();
+  res.json({ entry });
+});
+
+app.get('/api/timesheets', requireScheduler, (req, res) => {
+  const weekStart = req.query.weekStart;
+  let entries = db.data.timeEntries;
+  if (weekStart) {
+    const isoSet = new Set(weekDatesFrom(weekStart).map(toISO));
+    entries = entries.filter(t => isoSet.has(t.date));
+  }
+  res.json({ entries });
+});
+
+// Manual entries store a naive "local wall-clock" datetime string (no Z, no
+// offset) instead of converting through Date/toISOString — that conversion
+// would silently apply *this server's* OS timezone (e.g. Render's UTC),
+// which has nothing to do with the business's actual timezone. Real
+// clock-in/out button presses are fine as true UTC instants (see above);
+// only typed-in times need this naive-string treatment.
+app.post('/api/timesheets', requireAdmin, (req, res) => {
+  const { employeeId, date, clockIn, clockOut } = req.body || {};
+  if (!employeeId || !date || !clockIn) return res.status(400).json({ error: 'Missing fields.' });
+  const entry = { id: uid('te'), employeeId, date, clockIn: `${date}T${clockIn}:00`, clockOut: clockOut ? `${date}T${clockOut}:00` : null };
+  db.data.timeEntries.push(entry);
+  db.persist();
+  res.json({ entry });
+});
+
+app.patch('/api/timesheets/:id', requireAdmin, (req, res) => {
+  const entry = db.data.timeEntries.find(t => t.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Entry not found.' });
+  const { clockIn, clockOut } = req.body || {};
+  if (clockIn !== undefined) entry.clockIn = `${entry.date}T${clockIn}:00`;
+  if (clockOut !== undefined) entry.clockOut = clockOut ? `${entry.date}T${clockOut}:00` : null;
+  db.persist();
+  res.json({ entry });
+});
+
+app.delete('/api/timesheets/:id', requireAdmin, (req, res) => {
+  db.data.timeEntries = db.data.timeEntries.filter(t => t.id !== req.params.id);
+  db.persist();
+  res.json({ ok: true });
 });
 
 // ---------- static ----------
