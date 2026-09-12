@@ -316,7 +316,7 @@ app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
 app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   const emp = db.data.employees.find(e => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found.' });
-  const { name, email, phone, defaultPositionId, hourlyWage, positionWages, groupIds } = req.body || {};
+  const { name, email, phone, defaultPositionId, hourlyWage, positionWages, groupIds, archived } = req.body || {};
   if (name !== undefined) {
     if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
     emp.name = name.trim();
@@ -343,6 +343,10 @@ app.patch('/api/employees/:id', requireAdmin, (req, res) => {
     const validIds = new Set(db.data.groups.map(g => g.id));
     emp.groupIds = Array.isArray(groupIds) ? groupIds.filter(id => validIds.has(id)) : [];
   }
+  // Archived staff (e.g. seasonal Keeneland-only crew) stay fully on file —
+  // wages, availability, history — but drop out of active scheduling until
+  // someone brings them back.
+  if (archived !== undefined) emp.archived = !!archived;
   db.persist();
   res.json({ employee: adminEmployee(emp) });
 });

@@ -155,8 +155,8 @@ button:disabled{opacity:.5;cursor:default;}
 
 .staffcard{border:2px solid var(--line);border-radius:var(--radius-md);padding:12px;margin-bottom:10px;}
 .staffcard:last-child{margin-bottom:0;}
-.staffcard-head{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
-.staffcard-head .staffname{font-weight:700;flex:1;}
+.staffcard-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;}
+.staffcard-head .staffname{font-weight:700;flex:1;min-width:120px;}
 .staffcard-head button{flex-shrink:0;}
 .staffcard-fields{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
 .staffcard-fields select{grid-column:1 / -1;}

@@ -317,6 +317,15 @@ async function removeStaffMember(empId){
   render();
 }
 
+async function setArchived(empId, archived){
+  try{
+    const res = await api(`/api/employees/${empId}`, { method:'PATCH', body: JSON.stringify({ archived }) });
+    const idx = employees.findIndex(e=>e.id===empId);
+    if(idx>=0) employees[idx].archived = res.employee.archived;
+  }catch(e){ loadError = e.message; }
+  render();
+}
+
 // ---------- positions ----------
 async function addPosition(){
   const nameInput = document.getElementById('newPositionName');
@@ -587,7 +596,7 @@ function hasRequestedOff(employeeId, iso){
 }
 
 function slotOptionsHtml(iso, assignedId){
-  const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  const sortedEmps = employees.filter(e=>!e.archived || e.id===assignedId).sort((a,b)=>a.name.localeCompare(b.name));
   let options = `<option value="">— Open —</option>`;
   sortedEmps.forEach(emp=>{
     const st = effectiveAvailability(emp.id, iso);
@@ -601,7 +610,7 @@ function slotOptionsHtml(iso, assignedId){
 }
 
 function addAssigneeOptionsHtml(iso, excludeIds){
-  const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  const sortedEmps = employees.filter(e=>!e.archived).sort((a,b)=>a.name.localeCompare(b.name));
   let opts = '<option value="">+ Add staff…</option>';
   sortedEmps.forEach(emp=>{
     if(excludeIds.includes(emp.id)) return;
@@ -1049,7 +1058,7 @@ function renderMySchedule(emp){
           </div>
         </div>`;
       }
-      const coworkerOptions = employees.filter(e=>e.id!==emp.id)
+      const coworkerOptions = employees.filter(e=>e.id!==emp.id && !e.archived)
         .filter(e=>{ const st=effectiveAvailability(e.id, s.date); return st!=='unavailable' && !hasRequestedOff(e.id, s.date); })
         .sort((a,b)=>a.name.localeCompare(b.name))
         .map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
@@ -1541,7 +1550,11 @@ function renderScheduleView(opts){
     filterEmps = employees.filter(e=>shifts.some(s=>s.date && weekIso.includes(s.date) && getShiftEmployeeIds(s).includes(e.id)))
                            .sort((a,b)=>a.name.localeCompare(b.name));
   } else {
-    filterEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+    // Archived staff drop off the builder once they have no shifts left this
+    // week, but a week where they were still working keeps showing them —
+    // archiving shouldn't make past history vanish from the grid.
+    filterEmps = employees.filter(e=> !e.archived || shifts.some(s=>s.date && weekIso.includes(s.date) && getShiftEmployeeIds(s).includes(e.id)))
+                           .sort((a,b)=>a.name.localeCompare(b.name));
     if(groupFilter) filterEmps = filterEmps.filter(e=>(e.groupIds||[]).includes(groupFilter));
   }
 
@@ -1671,7 +1684,8 @@ function renderManagerView(){
   </div>`;
 
   const dates = getWeekDates(weekOffset);
-  const emps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
+  const emps = employees.filter(e=>!e.archived).sort((a,b)=>a.name.localeCompare(b.name));
+  const archivedEmps = employees.filter(e=>e.archived).sort((a,b)=>a.name.localeCompare(b.name));
 
   html += `<div class="card">
     <div class="weeknav">
@@ -1681,7 +1695,7 @@ function renderManagerView(){
     </div>`;
 
   if(emps.length===0){
-    html += `<p class="empty">No staff added yet. Ask them to add themselves under "I'm Staff".</p>`;
+    html += `<p class="empty">${archivedEmps.length ? 'No active staff — everyone on file is archived right now.' : 'No staff added yet. Ask them to add themselves under "I\'m Staff".'}</p>`;
   } else {
     html += `<div style="overflow-x:auto;"><table class="schedtable"><thead><tr><th style="text-align:left;">Staff</th>`;
     dates.forEach(d=>{
@@ -1722,7 +1736,26 @@ function renderManagerView(){
 
   html += renderAvailabilityLog();
   html += renderStaffDirectory(emps);
+  html += renderArchivedStaff(archivedEmps);
 
+  return html;
+}
+
+function renderArchivedStaff(archivedEmps){
+  let html = `<div class="card">
+    <h2>Archived Staff</h2>
+    <p class="empty" style="padding:0 0 10px;">Seasonal or inactive staff — e.g. Keeneland-only crew. They keep their wage, availability, and history, but won't show up on the schedule or in staff pickers until brought back.</p>`;
+  if(!archivedEmps.length){
+    html += `<p class="empty" style="padding:0;">Nobody archived right now.</p>`;
+  } else {
+    html += archivedEmps.map(emp=>`
+      <div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
+        <span>${emp.name}</span>
+        <button class="ghost" data-action="unarchivestaff" data-id="${emp.id}">Unarchive</button>
+      </div>
+    `).join('');
+  }
+  html += `</div>`;
   return html;
 }
 
@@ -1752,6 +1785,7 @@ function renderStaffDirectory(emps){
       <div class="staffcard">
         <div class="staffcard-head">
           <input type="text" class="staffname" value="${emp.name}" data-action="staffedit" data-id="${emp.id}" data-field="name" />
+          <button class="ghost" data-action="archivestaff" data-id="${emp.id}">Archive</button>
           <button class="danger" data-action="removestaff" data-id="${emp.id}">Remove</button>
         </div>
         <div class="staffcard-fields">
@@ -2003,6 +2037,8 @@ function bindEvents(){
       removeStaffMember(b.dataset.id);
     }
   });
+  app.querySelectorAll('[data-action="archivestaff"]').forEach(b=> b.onclick = ()=> setArchived(b.dataset.id, true));
+  app.querySelectorAll('[data-action="unarchivestaff"]').forEach(b=> b.onclick = ()=> setArchived(b.dataset.id, false));
 }
 
 loadAll();
