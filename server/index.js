@@ -6,6 +6,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 
 const db = require('./db');
+const { sendEmail } = require('./email');
 const { LOTS, DEFAULT_ROSTER, POSITION_COLORS, DAILY_TEMPLATES, slotApplies } = require('../shared/constants');
 
 const app = express();
@@ -113,6 +114,23 @@ function requireAnyAuth(req, res, next) {
 
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
 function toISO(d) { return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+function fmt12(t) {
+  const [h, m] = t.split(':').map(Number);
+  const ap = h >= 12 ? 'PM' : 'AM';
+  let hh = h % 12; if (hh === 0) hh = 12;
+  return hh + ':' + pad(m) + ' ' + ap;
+}
+function describeShiftForEmail(shift) {
+  if (!shift) return '';
+  let label;
+  if (shift.slotId) {
+    const template = (DAILY_TEMPLATES[shift.lot] || []).find(sl => sl.id === shift.slotId);
+    label = shift.lot + (template ? ' — ' + template.label : '');
+  } else {
+    label = shift.lot + (shift.customName ? ' — ' + shift.customName : ' — Extra shift');
+  }
+  return `${label} on ${shift.date}, ${fmt12(shift.start)}–${fmt12(shift.end)}`;
+}
 function mondayOf(date) {
   const d = new Date(date);
   const day = d.getDay();
@@ -522,9 +540,20 @@ app.post('/api/shifts/publish', requireScheduler, (req, res) => {
   const weekStart = req.body && req.body.weekStart;
   if (!weekStart) return res.status(400).json({ error: 'Missing weekStart.' });
   const isoSet = new Set(weekDatesFrom(weekStart).map(toISO));
-  db.data.shifts.forEach(s => { if (isoSet.has(s.date)) s.draft = false; });
+  const affectedIds = new Set();
+  db.data.shifts.forEach(s => {
+    if (!isoSet.has(s.date)) return;
+    s.draft = false;
+    (s.employeeIds || []).forEach(id => affectedIds.add(id));
+  });
   db.persist();
   res.json({ ok: true });
+
+  const weekLabel = weekStart;
+  affectedIds.forEach(id => {
+    const emp = db.data.employees.find(e => e.id === id);
+    if (emp) sendEmail(emp.email, 'Your schedule has been published', `Hi ${emp.name},\n\nThis week's schedule (starting ${weekLabel}) has been published. Check the shift board to see your shifts.\n\n— Xpress Parking Services`);
+  });
 });
 
 // ---------- shift swaps ----------
@@ -557,6 +586,8 @@ app.post('/api/swaps', requireLogin, (req, res) => {
   db.data.swapRequests.push(request);
   db.persist();
   res.json({ request });
+
+  sendEmail(coworker.email, 'Shift swap request', `Hi ${coworker.name},\n\n${req.employee.name} wants you to take their shift:\n${describeShiftForEmail(shift)}\n\nLog in to the shift board to accept or decline.\n\n— Xpress Parking Services`);
 });
 
 app.post('/api/swaps/:id/accept', requireLogin, (req, res) => {
@@ -573,15 +604,22 @@ app.post('/api/swaps/:id/accept', requireLogin, (req, res) => {
   db.data.swapRequests = db.data.swapRequests.filter(r => r.id !== req.params.id);
   db.persist();
   res.json({ shift: shift || null });
+
+  const fromEmp = db.data.employees.find(e => e.id === request.fromEmployeeId);
+  if (fromEmp && shift) sendEmail(fromEmp.email, 'Shift swap accepted', `Hi ${fromEmp.name},\n\n${req.employee.name} accepted your shift swap:\n${describeShiftForEmail(shift)}\n\n— Xpress Parking Services`);
 });
 
 app.post('/api/swaps/:id/decline', requireLogin, (req, res) => {
   const request = db.data.swapRequests.find(r => r.id === req.params.id);
   if (!request) return res.status(404).json({ error: 'Swap request not found.' });
   if (request.toEmployeeId !== req.employee.id) return res.status(403).json({ error: 'This swap is not addressed to you.' });
+  const shift = findShift(request.shiftId);
   db.data.swapRequests = db.data.swapRequests.filter(r => r.id !== req.params.id);
   db.persist();
   res.json({ ok: true });
+
+  const fromEmp = db.data.employees.find(e => e.id === request.fromEmployeeId);
+  if (fromEmp && shift) sendEmail(fromEmp.email, 'Shift swap declined', `Hi ${fromEmp.name},\n\n${req.employee.name} declined your shift swap offer:\n${describeShiftForEmail(shift)}\n\nYou're still on the hook for this shift — check the schedule.\n\n— Xpress Parking Services`);
 });
 
 app.delete('/api/swaps/:id', requireLogin, (req, res) => {
@@ -639,6 +677,9 @@ app.post('/api/pto/:id/approve', requireAdmin, (req, res) => {
   dates.forEach(iso => { db.data.availability[request.employeeId][iso] = 'unavailable'; });
   db.persist();
   res.json({ request });
+
+  const emp = db.data.employees.find(e => e.id === request.employeeId);
+  if (emp) sendEmail(emp.email, 'Time off approved', `Hi ${emp.name},\n\nYour time-off request for ${request.startDate} to ${request.endDate} has been approved.\n\n— Xpress Parking Services`);
 });
 
 app.post('/api/pto/:id/deny', requireAdmin, (req, res) => {
@@ -647,6 +688,9 @@ app.post('/api/pto/:id/deny', requireAdmin, (req, res) => {
   request.status = 'denied';
   db.persist();
   res.json({ request });
+
+  const emp = db.data.employees.find(e => e.id === request.employeeId);
+  if (emp) sendEmail(emp.email, 'Time off request denied', `Hi ${emp.name},\n\nYour time-off request for ${request.startDate} to ${request.endDate} was denied. Check the shift board or talk to your manager for details.\n\n— Xpress Parking Services`);
 });
 
 // ---------- time clock / timesheets ----------
