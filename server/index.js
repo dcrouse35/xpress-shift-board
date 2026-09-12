@@ -168,7 +168,10 @@ function expandCopyDates(baseDateISO, weekdays, repeatWeeks) {
 
 // ---------- auth ----------
 app.post('/api/auth/signup', (req, res) => {
-  let { name, email, phone, password, passwordConfirm } = req.body || {};
+  let { name, email, phone, password, passwordConfirm, signupCode } = req.body || {};
+  const requiredCode = process.env.STAFF_SIGNUP_CODE;
+  if (!requiredCode) return res.status(503).json({ error: 'Staff sign-up is not configured on this server.' });
+  if (!signupCode || signupCode !== requiredCode) return res.status(403).json({ error: 'Invalid sign-up code.' });
   name = (name || '').trim();
   email = (email || '').trim();
   phone = (phone || '').trim();

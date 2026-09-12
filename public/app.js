@@ -161,7 +161,7 @@ function cycleState(current){
 }
 
 // ---------- staff auth ----------
-async function addEmployee(name, email, phone, password, passwordConfirm){
+async function addEmployee(name, email, phone, password, passwordConfirm, signupCode){
   name = (name||'').trim();
   email = (email||'').trim();
   phone = (phone||'').trim();
@@ -172,7 +172,7 @@ async function addEmployee(name, email, phone, password, passwordConfirm){
   if(password !== passwordConfirm){ signupError = "Those passwords don't match."; render(); return; }
 
   try{
-    const res = await api('/api/auth/signup', { method:'POST', body: JSON.stringify({name,email,phone,password,passwordConfirm}) });
+    const res = await api('/api/auth/signup', { method:'POST', body: JSON.stringify({name,email,phone,password,passwordConfirm,signupCode}) });
     me = res.employee;
     admin = null;
     signupError = null;
@@ -742,6 +742,12 @@ function renderGate(){
       <div class="field">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         <input type="password" id="newEmpPasswordConfirm" placeholder="Confirm password" />
+      </div>
+
+      <div class="formsection">Company sign-up code</div>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input type="password" id="newEmpSignupCode" placeholder="Ask your manager for this" />
       </div>
 
       <button class="primary" style="width:100%;margin-top:14px;" id="addEmpBtn">Sign up</button>
@@ -1658,7 +1664,8 @@ function bindEvents(){
     const phone = app.querySelector('#newEmpPhone').value;
     const password = app.querySelector('#newEmpPassword').value;
     const passwordConfirm = app.querySelector('#newEmpPasswordConfirm').value;
-    addEmployee(name, email, phone, password, passwordConfirm);
+    const signupCode = app.querySelector('#newEmpSignupCode').value;
+    addEmployee(name, email, phone, password, passwordConfirm, signupCode);
   };
 
   const adminLoginBtn = app.querySelector('#adminLoginBtn');
