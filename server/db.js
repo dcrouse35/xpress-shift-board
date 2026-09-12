@@ -8,7 +8,7 @@ const DB_PATH = path.join(DATA_DIR, 'db.json');
 
 function defaultData() {
   return {
-    employees: [], availability: {}, shifts: [], weekLots: {}, swapRequests: [],
+    employees: [], availability: {}, weeklyAvailability: {}, shifts: [], weekLots: {}, swapRequests: [],
     admins: [], ptoRequests: [], positions: [], shiftTemplates: [], timeEntries: [], groups: []
   };
 }

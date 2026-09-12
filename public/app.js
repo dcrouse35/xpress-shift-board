@@ -1,7 +1,11 @@
 const { LOTS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS, WEEKLY_OVERTIME_HOURS, shiftHours, rangesOverlap } = window.APP_CONSTANTS;
 
+const WEEKDAY_ORDER = [1,2,3,4,5,6,0]; // Mon..Sun display order, values are JS getDay() (0=Sun..6=Sat)
+const WEEKDAY_NAMES = {0:'Sunday',1:'Monday',2:'Tuesday',3:'Wednesday',4:'Thursday',5:'Friday',6:'Saturday'};
+
 let employees = [];
-let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } }
+let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } } — date-specific overrides (approved time off lands here)
+let weeklyAvailability = {}; // { employeeId: { 0..6: state } } — the recurring weekly pattern staff set once, keyed by day of week
 let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, end, draft, open?, positionId?} ]
 let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
 let ptoRequests = []; // [ {id, employeeId, startDate, endDate, reason, status, createdAt} ]
@@ -119,11 +123,12 @@ function isFullAdmin(){ return !!admin && admin.role !== 'supervisor'; }
 function isScheduler(){ return !!admin; } // admin or supervisor
 
 async function loadProtectedData(){
-  const [empRes, availRes, shiftRes, swapRes, ptoRes, posRes, groupRes] = await Promise.all([
-    api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto'), api('/api/positions'), api('/api/groups')
+  const [empRes, availRes, weeklyAvailRes, shiftRes, swapRes, ptoRes, posRes, groupRes] = await Promise.all([
+    api('/api/employees'), api('/api/availability'), api('/api/weekly-availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto'), api('/api/positions'), api('/api/groups')
   ]);
   employees = empRes.employees;
   availability = availRes.availability;
+  weeklyAvailability = weeklyAvailRes.weeklyAvailability;
   shifts = shiftRes.shifts;
   swapRequests = swapRes.swaps;
   ptoRequests = ptoRes.requests;
@@ -157,14 +162,24 @@ async function loadTimesheets(){
   timeEntries = res.entries;
 }
 
-async function setDayState(empId, dateISO, newState){
+async function setWeekdayState(empId, day, newState){
   try{
-    await api('/api/availability/' + encodeURIComponent(dateISO), { method:'PUT', body: JSON.stringify({state:newState}) });
-    if(!availability[empId]) availability[empId] = {};
-    if(newState===null) delete availability[empId][dateISO];
-    else availability[empId][dateISO] = newState;
+    await api('/api/weekly-availability/' + day, { method:'PUT', body: JSON.stringify({state:newState}) });
+    if(!weeklyAvailability[empId]) weeklyAvailability[empId] = {};
+    if(newState===null) delete weeklyAvailability[empId][day];
+    else weeklyAvailability[empId][day] = newState;
   }catch(e){ loadError = e.message; }
   render();
+}
+
+// A specific date's approved-time-off override wins when set; otherwise
+// fall back to the employee's standing weekly pattern for that weekday.
+function effectiveAvailability(empId, iso){
+  const override = availability[empId] && availability[empId][iso];
+  if(override) return override;
+  const dow = new Date(iso+'T00:00:00').getDay();
+  const pattern = weeklyAvailability[empId];
+  return (pattern && pattern[dow]) || null;
 }
 
 function cycleState(current){
@@ -207,7 +222,7 @@ async function loginEmployee(email, password){
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
-  employees = []; availability = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
+  employees = []; availability = {}; weeklyAvailability = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
   wages = {}; shiftTemplates = []; timeEntries = []; clockStatus = null; admins = [];
   render();
 }
@@ -290,6 +305,7 @@ async function removeStaffMember(empId){
     await api(`/api/employees/${empId}`, { method:'DELETE' });
     employees = employees.filter(e=>e.id!==empId);
     delete availability[empId];
+    delete weeklyAvailability[empId];
     shifts.forEach(s=>{ s.employeeIds = (s.employeeIds||[]).filter(id=>id!==empId); });
   }catch(e){ loadError = e.message; }
   render();
@@ -568,7 +584,7 @@ function slotOptionsHtml(iso, assignedId){
   const sortedEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
   let options = `<option value="">— Open —</option>`;
   sortedEmps.forEach(emp=>{
-    const st = (availability[emp.id] && availability[emp.id][iso]) || null;
+    const st = effectiveAvailability(emp.id, iso);
     const unavailable = st === 'unavailable' || hasRequestedOff(emp.id, iso);
     if(unavailable && emp.id !== assignedId) return;
     let label = emp.name;
@@ -583,7 +599,7 @@ function addAssigneeOptionsHtml(iso, excludeIds){
   let opts = '<option value="">+ Add staff…</option>';
   sortedEmps.forEach(emp=>{
     if(excludeIds.includes(emp.id)) return;
-    const st = (availability[emp.id] && availability[emp.id][iso]) || null;
+    const st = effectiveAvailability(emp.id, iso);
     if(st === 'unavailable' || hasRequestedOff(emp.id, iso)) return;
     opts += `<option value="${emp.id}">${emp.name}</option>`;
   });
@@ -897,24 +913,22 @@ function renderStaffApp(){
 }
 
 function renderOnboarding(emp){
-  const onboardDates = getWeekDates(0);
-  const empAvailOnboard = availability[emp.id] || {};
-  const allSet = onboardDates.every(d=> !!empAvailOnboard[toISO(d)]);
+  const pattern = weeklyAvailability[emp.id] || {};
+  const allSet = WEEKDAY_ORDER.every(day=> !!pattern[day]);
 
   let html = `<div class="card">
     <h2>One last step — your availability</h2>
-    <p class="empty" style="padding:0 0 8px;">Hi ${emp.name} — set your status for each day this week so we know when you can work. You can always change this later.</p>
+    <p class="empty" style="padding:0 0 8px;">Hi ${emp.name} — set which days of the week you can generally work. This isn't week-specific, it applies every week going forward. Need a particular day off later? Use Time Off for that.</p>
   </div>`;
 
   html += '<div class="card">';
-  onboardDates.forEach(d=>{
-    const iso = toISO(d);
-    const state = empAvailOnboard[iso] || null;
+  WEEKDAY_ORDER.forEach(day=>{
+    const state = pattern[day] || null;
     const cls = state ? state : '';
     const label = state ? STATE_LABEL[state] : 'Tap to set';
     html += `<div class="daytile">
-      <div class="dinfo"><div class="dname">${fmtDayName(d)}</div><div class="ddate">${fmtDayShort(d)}</div></div>
-      <button class="statebtn ${cls}" data-action="toggleday" data-date="${iso}">${icon(state)}<span>${label}</span></button>
+      <div class="dinfo"><div class="dname">${WEEKDAY_NAMES[day]}</div></div>
+      <button class="statebtn ${cls}" data-action="toggleweekday" data-day="${day}">${icon(state)}<span>${label}</span></button>
     </div>`;
   });
   html += '</div>';
@@ -985,39 +999,29 @@ function renderMySchedule(emp){
     <button class="primary" style="width:100%;margin-top:12px;" data-action="saveinfo">Save changes</button>
   </div>`;
 
+  const pattern = weeklyAvailability[emp.id] || {};
+  html += `<div class="card">
+    <h2>Your weekly availability</h2>
+    <p class="empty" style="padding:0 0 8px;">This applies every week, not just this one. Need a specific day off? Use the Time Off tab instead.</p>`;
+  WEEKDAY_ORDER.forEach(day=>{
+    const state = pattern[day] || null;
+    const cls = state ? state : '';
+    const label = state ? STATE_LABEL[state] : 'Tap to set';
+    html += `<div class="daytile">
+      <div class="dinfo"><div class="dname">${WEEKDAY_NAMES[day]}</div></div>
+      <button class="statebtn ${cls}" data-action="toggleweekday" data-day="${day}">${icon(state)}<span>${label}</span></button>
+    </div>`;
+  });
+  html += `</div>`;
+
   const dates = getWeekDates(weekOffset);
   html += `<div class="card">
     <div class="weeknav">
       <button data-action="week" data-dir="-1">‹</button>
       <div class="label">${fmtWeekLabel(dates)}</div>
       <button data-action="week" data-dir="1">›</button>
-    </div>`;
-
-  dates.forEach(d=>{
-    const iso = toISO(d);
-    const state = (availability[emp.id] && availability[emp.id][iso]) || null;
-    const cls = state ? state : '';
-    const label = state ? STATE_LABEL[state] : 'Tap to set';
-    html += `<div class="daytile">
-      <div class="dinfo"><div class="dname">${fmtDayName(d)}</div><div class="ddate">${fmtDayShort(d)}</div></div>
-      <button class="statebtn ${cls}" data-action="toggleday" data-date="${iso}">${icon(state)}<span>${label}</span></button>
-    </div>`;
-  });
-  html += `</div>`;
-
-  html += `<div class="card"><h2>Your availability this week</h2>`;
-  const empAvail = availability[emp.id] || {};
-  const anySet = dates.some(d=>empAvail[toISO(d)]);
-  if(!anySet){
-    html += `<p class="empty">Nothing set yet — tap each day above and it'll show up here.</p>`;
-  } else {
-    dates.forEach(d=>{
-      const iso = toISO(d);
-      const state = empAvail[iso];
-      html += `<div class="summaryline"><span>${fmtDayName(d)}, ${fmtDayShort(d)}</span><span class="tag ${state||'unset'}">${state?STATE_LABEL[state]:'Not set'}</span></div>`;
-    });
-  }
-  html += `</div>`;
+    </div>
+  </div>`;
 
   const myShifts = shifts.filter(s=>getShiftEmployeeIds(s).includes(emp.id) && dates.some(d=>toISO(d)===s.date))
                           .sort((a,b)=> a.date===b.date ? a.start.localeCompare(b.start) : a.date.localeCompare(b.date));
@@ -1038,7 +1042,7 @@ function renderMySchedule(emp){
         </div>`;
       }
       const coworkerOptions = employees.filter(e=>e.id!==emp.id)
-        .filter(e=>{ const st=(availability[e.id]||{})[s.date]; return st!=='unavailable' && !hasRequestedOff(e.id, s.date); })
+        .filter(e=>{ const st=effectiveAvailability(e.id, s.date); return st!=='unavailable' && !hasRequestedOff(e.id, s.date); })
         .sort((a,b)=>a.name.localeCompare(b.name))
         .map(e=>`<option value="${e.id}">${e.name}</option>`).join('');
       return `<div class="staffcard">
@@ -1055,7 +1059,7 @@ function renderMySchedule(emp){
   const todayIso = toISO(new Date());
   const openShifts = shifts.filter(s=>s.open && !getShiftEmployeeIds(s).length && s.date>=todayIso)
                             .filter(s=>{
-                              const st = (availability[emp.id]||{})[s.date];
+                              const st = effectiveAvailability(emp.id, s.date);
                               return st !== 'unavailable' && !hasRequestedOff(emp.id, s.date);
                             })
                             .sort((a,b)=> a.date===b.date ? a.start.localeCompare(b.start) : a.date.localeCompare(b.date));
@@ -1336,14 +1340,10 @@ function buildScheduleRows(dates, filterEmps){
         if(rangesOverlap(as, ae, bs, be)){ A.conflict = true; B.conflict = true; }
       }
     }
-    // Flag shifts scheduled against a day the employee marked unavailable —
-    // approved PTO also lands here since approving a request marks those
-    // dates unavailable, so this one check covers both cases.
+    // Flag shifts scheduled against a day the employee's weekly pattern (or
+    // an approved time-off override) marks unavailable.
     const empId = k.split('|')[0];
-    const empAvail = availability[empId];
-    if(empAvail){
-      blocks.forEach(b=>{ if(empAvail[b.date]==='unavailable') b.availConflict = true; });
-    }
+    blocks.forEach(b=>{ if(effectiveAvailability(empId, b.date)==='unavailable') b.availConflict = true; });
   });
 
   // weekly scheduled hours per row key (for overtime warnings) and cost per employee
@@ -1685,7 +1685,7 @@ function renderManagerView(){
       html += `<tr><td class="namecell">${emp.name}</td>`;
       dates.forEach(d=>{
         const iso = toISO(d);
-        const state = (availability[emp.id] && availability[emp.id][iso]) || null;
+        const state = effectiveAvailability(emp.id, iso);
         html += `<td>${state ? `<span class="dot ${state}" title="${STATE_LABEL[state]}"></span>` : '—'}</td>`;
       });
       html += `</tr>`;
@@ -1700,7 +1700,7 @@ function renderManagerView(){
     if(d){
       const dayGroups = {available:[], unavailable:[], unset:[]};
       emps.forEach(emp=>{
-        const state = (availability[emp.id] && availability[emp.id][openDayKey]) || 'unset';
+        const state = effectiveAvailability(emp.id, openDayKey) || 'unset';
         dayGroups[state].push(emp.name);
       });
       html += `<div class="card breakdown">
@@ -1953,11 +1953,11 @@ function bindEvents(){
   const groupFilterSel = app.querySelector('#scheduleGroupFilter');
   if(groupFilterSel) groupFilterSel.onchange = ()=>{ groupFilter = groupFilterSel.value; render(); };
 
-  app.querySelectorAll('[data-action="toggleday"]').forEach(b=> b.onclick = ()=>{
+  app.querySelectorAll('[data-action="toggleweekday"]').forEach(b=> b.onclick = ()=>{
     if(!me) return;
-    const date = b.dataset.date;
-    const current = (availability[me.id] && availability[me.id][date]) || null;
-    setDayState(me.id, date, cycleState(current));
+    const day = Number(b.dataset.day);
+    const current = (weeklyAvailability[me.id] && weeklyAvailability[me.id][day]) || null;
+    setWeekdayState(me.id, day, cycleState(current));
   });
 
   app.querySelectorAll('[data-action="opendaybreakdown"]').forEach(th=> th.onclick = ()=>{

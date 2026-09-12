@@ -287,9 +287,8 @@ app.put('/api/employees/me', requireLogin, (req, res) => {
 });
 
 app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
-  const dates = weekDatesFrom(toISO(mondayOf(new Date()))).map(toISO);
-  const avail = db.data.availability[req.employee.id] || {};
-  const allSet = dates.every(iso => !!avail[iso]);
+  const pattern = db.data.weeklyAvailability[req.employee.id] || {};
+  const allSet = [0, 1, 2, 3, 4, 5, 6].every(day => !!pattern[day]);
   if (!allSet) return res.status(400).json({ error: 'Set a status for all 7 days first.' });
   req.employee.onboarded = true;
   db.persist();
@@ -343,6 +342,7 @@ app.delete('/api/employees/:id', requireAdmin, (req, res) => {
   if (idx === -1) return res.status(404).json({ error: 'Employee not found.' });
   db.data.employees.splice(idx, 1);
   delete db.data.availability[req.params.id];
+  delete db.data.weeklyAvailability[req.params.id];
   db.data.shifts.forEach(s => {
     if (s.employeeIds) s.employeeIds = s.employeeIds.filter(id => id !== req.params.id);
   });
@@ -478,6 +478,31 @@ app.put('/api/availability/:date', requireLogin, (req, res) => {
   else db.data.availability[req.employee.id][date] = state;
   db.persist();
   res.json({ availability: db.data.availability[req.employee.id] || {} });
+});
+
+// Staff set ONE recurring weekly pattern instead of re-entering it every
+// week (nobody actually did that) — keyed by JS getDay() (0=Sun..6=Sat) to
+// match the convention DAILY_TEMPLATES already uses. A specific date can
+// still be overridden in `availability` above; that's how an approved
+// time-off request cuts in over the usual pattern for just those days.
+app.get('/api/weekly-availability', requireAnyAuth, (req, res) => {
+  res.json({ weeklyAvailability: db.data.weeklyAvailability });
+});
+
+app.put('/api/weekly-availability/:day', requireLogin, (req, res) => {
+  const day = Number(req.params.day);
+  const state = (req.body && req.body.state) || null;
+  if (!Number.isInteger(day) || day < 0 || day > 6) {
+    return res.status(400).json({ error: 'Invalid day of week.' });
+  }
+  if (state !== null && state !== 'available' && state !== 'unavailable') {
+    return res.status(400).json({ error: 'Invalid availability state.' });
+  }
+  if (!db.data.weeklyAvailability[req.employee.id]) db.data.weeklyAvailability[req.employee.id] = {};
+  if (state === null) delete db.data.weeklyAvailability[req.employee.id][day];
+  else db.data.weeklyAvailability[req.employee.id][day] = state;
+  db.persist();
+  res.json({ weeklyAvailability: db.data.weeklyAvailability[req.employee.id] || {} });
 });
 
 // ---------- shifts ----------
