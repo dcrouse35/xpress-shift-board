@@ -190,10 +190,9 @@ app.post('/api/auth/signup', (req, res) => {
     unclaimed.phone = phone;
     unclaimed.passwordHash = passwordHash;
     if (unclaimed.onboarded === undefined) unclaimed.onboarded = false;
-    if (!unclaimed.lot) unclaimed.lot = 'Unassigned';
     emp = unclaimed;
   } else {
-    emp = { id: uid('e'), name, email, phone, lot: 'Unassigned', passwordHash, onboarded: false };
+    emp = { id: uid('e'), name, email, phone, passwordHash, onboarded: false };
     db.data.employees.push(emp);
   }
   req.session.employeeId = emp.id;
@@ -275,12 +274,11 @@ app.get('/api/employees', requireAnyAuth, (req, res) => {
 });
 
 app.put('/api/employees/me', requireLogin, (req, res) => {
-  const { name, email, phone, lot } = req.body || {};
+  const { name, email, phone } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: "Name can't be blank." });
   req.employee.name = name.trim();
   req.employee.email = (email || '').trim();
   req.employee.phone = (phone || '').trim();
-  if (lot) req.employee.lot = lot;
   db.persist();
   res.json({ employee: publicEmployee(req.employee) });
 });
@@ -298,14 +296,13 @@ app.put('/api/employees/me/onboard', requireLogin, (req, res) => {
 app.patch('/api/employees/:id', requireAdmin, (req, res) => {
   const emp = db.data.employees.find(e => e.id === req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found.' });
-  const { name, email, phone, lot, defaultPositionId, hourlyWage } = req.body || {};
+  const { name, email, phone, defaultPositionId, hourlyWage } = req.body || {};
   if (name !== undefined) {
     if (!name.trim()) return res.status(400).json({ error: "Name can't be blank." });
     emp.name = name.trim();
   }
   if (email !== undefined) emp.email = email.trim();
   if (phone !== undefined) emp.phone = phone.trim();
-  if (lot !== undefined) emp.lot = lot;
   if (defaultPositionId !== undefined) emp.defaultPositionId = defaultPositionId || null;
   if (hourlyWage !== undefined) {
     const n = Number(hourlyWage);
@@ -338,7 +335,7 @@ app.post('/api/employees/import', requireAdmin, (req, res) => {
   let added = 0;
   DEFAULT_ROSTER.forEach(name => {
     if (!existing.has(name.toLowerCase())) {
-      db.data.employees.push({ id: uid('e'), name, lot: 'Unassigned', onboarded: false });
+      db.data.employees.push({ id: uid('e'), name, onboarded: false });
       existing.add(name.toLowerCase());
       added++;
     }

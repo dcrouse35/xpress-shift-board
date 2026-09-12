@@ -1,4 +1,4 @@
-const { LOTS, EMP_HOME_TAGS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS, WEEKLY_OVERTIME_HOURS, shiftHours, rangesOverlap } = window.APP_CONSTANTS;
+const { LOTS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS, WEEKLY_OVERTIME_HOURS, shiftHours, rangesOverlap } = window.APP_CONSTANTS;
 
 let employees = [];
 let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } }
@@ -19,7 +19,6 @@ let adminSignupRole = 'admin'; // role picked on the admin signup form
 let staffTab = 'my';     // 'my' | 'schedule' | 'timeoff'
 let adminTab = 'schedule'; // 'schedule' | 'staff' | 'timeoff' | 'timesheets'
 
-let managerLot = '__ALL__';
 let scheduleEditor = null; // { type:'slot', date, lot, slotId, start, end } | { type:'shift', shiftId } | { type:'newcustom', employeeId, date }
 let addShiftError = null;
 let signupError = null;
@@ -241,9 +240,8 @@ async function updateMyInfo(){
   if(!name.trim()){ signupError = "Name can't be blank."; render(); return; }
   const email = ((document.getElementById('myEmail')||{}).value || '').trim();
   const phone = ((document.getElementById('myPhone')||{}).value || '').trim();
-  const lot = (document.getElementById('myLot')||{}).value;
   try{
-    const res = await api('/api/employees/me', { method:'PUT', body: JSON.stringify({name,email,phone,lot}) });
+    const res = await api('/api/employees/me', { method:'PUT', body: JSON.stringify({name,email,phone}) });
     me = res.employee;
     const idx = employees.findIndex(e=>e.id===me.id);
     if(idx>=0) employees[idx] = me;
@@ -903,8 +901,6 @@ function renderMySchedule(emp){
     <input type="text" id="myEmail" value="${emp.email||''}" />
     <label style="margin-top:10px;">Phone number</label>
     <input type="text" id="myPhone" value="${emp.phone||''}" />
-    <label style="margin-top:10px;">Home lot</label>
-    <select id="myLot">${EMP_HOME_TAGS.map(l=>`<option value="${l}" ${emp.lot===l?'selected':''}>${l}</option>`).join('')}</select>
     <button class="primary" style="width:100%;margin-top:12px;" data-action="saveinfo">Save changes</button>
   </div>`;
 
@@ -1445,14 +1441,7 @@ function renderScheduleView(opts){
     filterEmps = employees.filter(e=>shifts.some(s=>s.date && weekIso.includes(s.date) && getShiftEmployeeIds(s).includes(e.id)))
                            .sort((a,b)=>a.name.localeCompare(b.name));
   } else {
-    html += '<div class="card"><h2>Lot</h2>';
-    html += `<select id="lotSelect">
-      <option value="__ALL__" ${managerLot==='__ALL__'?'selected':''}>All Lots</option>
-      ${LOTS.map(l=>`<option value="${l}" ${managerLot===l?'selected':''}>${l}</option>`).join('')}
-      <option value="Unassigned" ${managerLot==='Unassigned'?'selected':''}>Unassigned</option>
-    </select></div>`;
-    filterEmps = employees.filter(e => managerLot==='__ALL__' || e.lot===managerLot)
-                           .sort((a,b)=>a.name.localeCompare(b.name));
+    filterEmps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
   }
 
   html += `<div class="card" style="padding:12px 8px;">
@@ -1532,7 +1521,7 @@ function renderManagerView(){
 
   html += `<div class="card">
     <h2>Import roster</h2>
-    <p class="empty" style="padding:0 0 10px;">Adds all active QuickBooks employees to the list below, tagged "Unassigned" until you sort them into lots. Safe to tap more than once — names already on the list are skipped.</p>
+    <p class="empty" style="padding:0 0 10px;">Adds all active QuickBooks employees to the list below. Safe to tap more than once — names already on the list are skipped.</p>
     <button class="primary" style="width:100%;" data-action="importroster">Import roster</button>
   </div>`;
 
@@ -1558,16 +1547,8 @@ function renderManagerView(){
     <button class="primary" style="width:100%;margin-top:12px;" data-action="addposition">Add position</button>
   </div>`;
 
-  html += '<div class="card"><h2>Lot</h2>';
-  html += `<select id="lotSelect">
-    <option value="__ALL__" ${managerLot==='__ALL__'?'selected':''}>All Lots (Admin)</option>
-    ${LOTS.map(l=>`<option value="${l}" ${managerLot===l?'selected':''}>${l}</option>`).join('')}
-    <option value="Unassigned" ${managerLot==='Unassigned'?'selected':''}>Unassigned</option>
-  </select></div>`;
-
   const dates = getWeekDates(weekOffset);
-  const emps = employees.filter(e => managerLot==='__ALL__' || e.lot===managerLot)
-                         .sort((a,b)=>a.name.localeCompare(b.name));
+  const emps = employees.slice().sort((a,b)=>a.name.localeCompare(b.name));
 
   html += `<div class="card">
     <div class="weeknav">
@@ -1577,7 +1558,7 @@ function renderManagerView(){
     </div>`;
 
   if(emps.length===0){
-    html += `<p class="empty">No staff added for this lot yet. Ask them to add themselves under "I'm Staff".</p>`;
+    html += `<p class="empty">No staff added yet. Ask them to add themselves under "I'm Staff".</p>`;
   } else {
     html += `<div style="overflow-x:auto;"><table class="schedtable"><thead><tr><th style="text-align:left;">Staff</th>`;
     dates.forEach(d=>{
@@ -1586,7 +1567,7 @@ function renderManagerView(){
     });
     html += `</tr></thead><tbody>`;
     emps.forEach(emp=>{
-      html += `<tr><td class="namecell">${emp.name}${managerLot==='__ALL__'?`<br><span style="font-weight:400;color:var(--ink-muted);font-size:10.5px;">${emp.lot}</span>`:''}</td>`;
+      html += `<tr><td class="namecell">${emp.name}</td>`;
       dates.forEach(d=>{
         const iso = toISO(d);
         const state = (availability[emp.id] && availability[emp.id][iso]) || null;
@@ -1608,7 +1589,7 @@ function renderManagerView(){
         groups[state].push(emp.name);
       });
       html += `<div class="card breakdown">
-        <h3>${fmtDayName(d)}, ${fmtDayShort(d)} — ${managerLot==='__ALL__'?'All Lots':managerLot}</h3>
+        <h3>${fmtDayName(d)}, ${fmtDayShort(d)}</h3>
         ${renderGroup('available','Available',groups.available)}
         ${renderGroup('unavailable','Unavailable',groups.unavailable)}
         ${renderGroup('unset',"Haven't responded",groups.unset)}
@@ -1624,7 +1605,7 @@ function renderManagerView(){
 function renderStaffDirectory(emps){
   let html = `<div class="card"><h2>Staff Directory</h2>`;
   if(emps.length===0){
-    html += `<p class="empty">No staff to show for this lot yet.</p>`;
+    html += `<p class="empty">No staff added yet.</p>`;
   } else {
     html += `<div class="staffdirectory-grid">` + emps.map(emp=>`
       <div class="staffcard">
@@ -1635,9 +1616,6 @@ function renderStaffDirectory(emps){
         <div class="staffcard-fields">
           <input type="text" placeholder="Email" value="${emp.email||''}" data-action="staffedit" data-id="${emp.id}" data-field="email" />
           <input type="text" placeholder="Phone" value="${emp.phone||''}" data-action="staffedit" data-id="${emp.id}" data-field="phone" />
-          <select data-action="staffedit" data-id="${emp.id}" data-field="lot">
-            ${EMP_HOME_TAGS.map(l=>`<option value="${l}" ${emp.lot===l?'selected':''}>${l}</option>`).join('')}
-          </select>
           <select data-action="staffedit" data-id="${emp.id}" data-field="defaultPositionId">${positionOptionsHtml(emp.defaultPositionId)}</select>
           <div class="field" style="margin-top:0;grid-column:1 / -1;">
             <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--ink-muted);font-size:14px;">$</span>
@@ -1727,9 +1705,6 @@ function bindEvents(){
   app.querySelectorAll('[data-action="cancelpto"]').forEach(b=> b.onclick = ()=> cancelPto(b.dataset.id));
   app.querySelectorAll('[data-action="approvepto"]').forEach(b=> b.onclick = ()=> approvePto(b.dataset.id));
   app.querySelectorAll('[data-action="denypto"]').forEach(b=> b.onclick = ()=> denyPto(b.dataset.id));
-
-  const lotSelect = app.querySelector('#lotSelect');
-  if(lotSelect) lotSelect.onchange = ()=>{ managerLot = lotSelect.value; openDayKey=null; scheduleEditor=null; render(); };
 
   app.querySelectorAll('[data-action="importroster"]').forEach(b=> b.onclick = ()=> importRoster());
 

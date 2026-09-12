@@ -1,6 +1,5 @@
 (function (root) {
   const LOTS = ["Calvary Baptist","FUMC","First Pres","Burl Lot","Broadway","Jefferson","Tony's Storage"];
-  const EMP_HOME_TAGS = ["Unassigned", ...LOTS];
 
   const DEFAULT_ROSTER = [
     "AJ Abram","Ransom Anotine","Luke Argamasilla","Blake Ball","Caden Barrett","Cameron Bays","Brody Beall",
@@ -74,7 +73,7 @@
   }
 
   const constants = {
-    LOTS, EMP_HOME_TAGS, DEFAULT_ROSTER, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS,
+    LOTS, DEFAULT_ROSTER, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotApplies, POSITION_COLORS,
     WEEKLY_OVERTIME_HOURS, shiftHours, rangesOverlap
   };
 
