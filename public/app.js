@@ -743,6 +743,7 @@ function render(){
     </svg>
     <div class="titles"><h1>Shiftline</h1><span class="tagline">Xpress Parking Services</span></div>
   </div>`;
+  html += `<div class="hatch"></div>`;
 
   if(loadError){
     html += `<div class="err">${loadError}</div>`;
@@ -1584,12 +1585,13 @@ function renderScheduleView(opts){
   </div>`;
 
   if(scheduleEditor){
-    if(scheduleEditor.type==='slot') html += renderSlotEditor(scheduleEditor);
-    else if(scheduleEditor.type==='shift'){
-      const editorHtml = renderShiftEditor(scheduleEditor);
-      if(editorHtml) html += editorHtml; else scheduleEditor = null;
-    }
-    else if(scheduleEditor.type==='newcustom') html += renderNewCustomEditor(scheduleEditor);
+    let editorHtml = '';
+    if(scheduleEditor.type==='slot') editorHtml = renderSlotEditor(scheduleEditor);
+    else if(scheduleEditor.type==='shift') editorHtml = renderShiftEditor(scheduleEditor);
+    else if(scheduleEditor.type==='newcustom') editorHtml = renderNewCustomEditor(scheduleEditor);
+
+    if(!editorHtml) scheduleEditor = null;
+    else html += `<div class="modal-overlay"><div class="modal-panel">${editorHtml}</div></div>`;
   }
 
   return html;
@@ -1877,6 +1879,10 @@ function bindEvents(){
     render();
   });
   app.querySelectorAll('[data-action="closeeditor"]').forEach(b=> b.onclick = ()=>{ scheduleEditor = null; addShiftError = null; render(); });
+  const editorOverlay = app.querySelector('.modal-overlay');
+  if(editorOverlay) editorOverlay.onclick = (e)=>{
+    if(e.target === editorOverlay){ scheduleEditor = null; addShiftError = null; render(); }
+  };
   app.querySelectorAll('[data-action="saveslot"]').forEach(b=> b.onclick = ()=> saveSlotEditor());
   app.querySelectorAll('[data-action="savenewcustom"]').forEach(b=> b.onclick = ()=> saveNewCustomEditor());
 

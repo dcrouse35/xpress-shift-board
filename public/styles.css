@@ -37,9 +37,21 @@ body{
 @media (min-width:860px){ #app{max-width:900px;padding:28px 24px 70px;} }
 @media (min-width:1180px){ #app{max-width:1240px;padding:32px 32px 80px;} }
 
+/* shift/slot editor pops up over the page instead of appending at the
+   bottom of a potentially very long schedule — reachable no matter how
+   far down the grid you clicked. */
+.modal-overlay{
+  position:fixed;inset:0;z-index:50;
+  background:rgba(22,20,15,.6);
+  display:flex;align-items:flex-start;justify-content:center;
+  padding:48px 16px;overflow-y:auto;
+}
+.modal-panel{width:100%;max-width:460px;}
+.modal-panel .card{margin-bottom:0;}
+
 /* header */
 .masthead{
-  display:flex;align-items:center;gap:12px;margin-bottom:22px;padding:14px 18px;
+  display:flex;align-items:center;gap:12px;margin-bottom:10px;padding:14px 18px;
   background:var(--surface);border:2px solid var(--ink);border-radius:var(--radius-lg);
   box-shadow:var(--shadow);
 }
@@ -47,6 +59,13 @@ body{
 .masthead .titles{display:flex;flex-direction:column;}
 .masthead h1{font-family:var(--font-display);font-size:17px;margin:0;font-weight:400;letter-spacing:.01em;line-height:1;color:var(--ink);}
 .masthead .tagline{font-size:10.5px;margin-top:3px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;line-height:1;color:var(--ink-muted);}
+
+/* one deliberate hazard-stripe moment under the header — the boldest
+   accent on the page, spent in exactly one place. */
+.hatch{
+  height:7px;margin:0 0 22px;border-radius:4px;
+  background-image:repeating-linear-gradient(-45deg, var(--ink) 0 10px, var(--brand) 10px 20px);
+}
 
 .tabs{display:flex;gap:4px;background:var(--surface);border:2px solid var(--line-strong);border-radius:14px;padding:4px;margin-bottom:18px;}
 .tab{flex:1;text-align:center;padding:11px 6px;border-radius:10px;font-size:13.5px;font-weight:700;color:var(--ink-muted);cursor:pointer;user-select:none;border:none;background:transparent;font-family:var(--font);transition:background .15s,color .15s;}
