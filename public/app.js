@@ -25,7 +25,19 @@ function rateFor(employeeId, positionId){
   return w.hourlyWage || 0;
 }
 
-let payRates = []; // [ {id, lot, positionId|null, payType:'hourly'|'salary', rate} ] — standard rate for a location+position combo, e.g. "Driver at Tony's = $2.50/hr"; positionId null = applies regardless of position
+let payRates = []; // [ {id, lot, positionId|null, payType:'hourly'|'salary', rate, qbPayrollItem} ] — standard rate for a location+position combo, e.g. "Driver at Tony's = $2.50/hr"; positionId null = applies regardless of position
+let qbCustomerOverrides = {}; // { lot: qbCustomerName } — only needed where the QuickBooks Customer differs from the location name itself, e.g. event venues like Apiary/Ashbourne
+
+// Real QuickBooks Time payroll items, for autocomplete convenience only —
+// admins can still type anything, this just cuts down on typos that would
+// silently produce a QB export column that doesn't match anything.
+const QB_PAYROLL_ITEMS = [
+  'Regular Pay','Apiary','Assistant Manager Pay','Bonus','Bookkeeper','Cash Tips','Commission','Gratuity',
+  'Holiday Pay','Hotel Overnight Pay','Hotel Valet Pay','Keeneland Race Meet','Keeneland Sales',
+  'Lot Checking/Cleaning','Midway','Mileage','Overtime Pay','Paid time off','Parking Attendant','Paycheck Tips',
+  'Private Event Pay','Qualified OT Tracking','Reimbursement','Salary','Thoroughbred Club','Training Day (Valet)',
+  'Unpaid time off'
+];
 
 // A shift's location+position combo checks the shared rate card first (an
 // exact position match, then a lot-wide "any position" entry); only falls
@@ -154,11 +166,12 @@ async function loadProtectedData(){
   groups = groupRes.groups;
 
   if(isScheduler()){
-    const [wageRes, tmplRes, logRes, rateRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates'), api('/api/availability-log'), api('/api/pay-rates') ]);
+    const [wageRes, tmplRes, logRes, rateRes, qbRes] = await Promise.all([ api('/api/wages'), api('/api/shift-templates'), api('/api/availability-log'), api('/api/pay-rates'), api('/api/qb-settings') ]);
     wages = wageRes.wages;
     shiftTemplates = tmplRes.templates;
     availabilityLog = logRes.log;
     payRates = rateRes.payRates;
+    qbCustomerOverrides = qbRes.qbCustomerOverrides;
     await loadTimesheets();
   }
   if(isFullAdmin()){
@@ -243,7 +256,7 @@ async function loginEmployee(email, password){
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
-  employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; payRates = []; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
+  employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; payRates = []; qbCustomerOverrides = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
   wages = {}; shiftTemplates = []; timeEntries = []; clockStatus = null; admins = [];
   render();
 }
@@ -418,10 +431,11 @@ async function addPayRate(){
   const positionId = (document.getElementById('newRatePosition')||{}).value || null;
   const payType = (document.getElementById('newRateType')||{}).value;
   const rate = (document.getElementById('newRateAmount')||{}).value;
+  const qbPayrollItem = (document.getElementById('newRateQbItem')||{}).value?.trim() || null;
   if(!lot){ payRateError = 'Enter a location.'; render(); return; }
   if(rate === '' || Number(rate) < 0){ payRateError = 'Enter a valid rate.'; render(); return; }
   try{
-    const res = await api('/api/pay-rates', { method:'POST', body: JSON.stringify({ lot, positionId, payType, rate }) });
+    const res = await api('/api/pay-rates', { method:'POST', body: JSON.stringify({ lot, positionId, payType, rate, qbPayrollItem }) });
     payRates.push(res.payRate);
     payRateError = null;
   }catch(e){ payRateError = e.message; }
@@ -431,6 +445,14 @@ async function removePayRate(id){
   try{
     await api(`/api/pay-rates/${id}`, { method:'DELETE' });
     payRates = payRates.filter(r=>r.id!==id);
+  }catch(e){ payRateError = e.message; }
+  render();
+}
+
+async function updateQbCustomerOverride(lot, qbCustomer){
+  try{
+    const res = await api('/api/qb-settings/customer-override', { method:'PUT', body: JSON.stringify({ lot, qbCustomer }) });
+    qbCustomerOverrides = res.qbCustomerOverrides;
   }catch(e){ payRateError = e.message; }
   render();
 }
@@ -1254,6 +1276,7 @@ function renderTimesheets(){
       <div class="label">${fmtWeekLabel(dates)}</div>
       <button data-action="week" data-dir="1">›</button>
     </div>
+    <a class="btn" href="/api/timesheets/qb-export?weekStart=${toISO(dates[0])}" style="display:block;text-align:center;text-decoration:none;background:var(--brand);color:#fff;border:2px solid var(--brand);border-radius:var(--radius-md);padding:11px 16px;font-size:14px;font-weight:700;margin-top:12px;">Export for QuickBooks</a>
   </div>`;
 
   const byEmp = {};
@@ -1730,6 +1753,7 @@ function renderManagerView(){
   </div>`;
 
   html += renderPayRates();
+  html += renderQbSettings();
 
   const dates = getWeekDates(weekOffset);
   const emps = employees.filter(e=>!e.archived).sort((a,b)=>a.name.localeCompare(b.name));
@@ -1789,10 +1813,27 @@ function renderManagerView(){
   return html;
 }
 
-function knownLocationsHtml(){
+function knownLocationsList(){
   const known = new Set([...LOTS, ...Object.keys(DAILY_TEMPLATES), 'Private Event']);
   shifts.forEach(s=>{ if(s.lot) known.add(s.lot); });
-  return Array.from(known).sort().map(l=>`<option value="${l}"></option>`).join('');
+  return Array.from(known).sort();
+}
+function knownLocationsHtml(){
+  return knownLocationsList().map(l=>`<option value="${l}"></option>`).join('');
+}
+
+function renderQbSettings(){
+  const locs = knownLocationsList();
+  return `<div class="card">
+    <h2>QuickBooks Export Settings</h2>
+    <p class="empty" style="padding:0 0 10px;">Most locations export to QuickBooks as a Customer of the exact same name. Only fill one in below where that's NOT true — e.g. an event venue like Apiary or Ashbourne that bills under a different Customer name than the location label used here.</p>
+    ${locs.map(l=>`
+      <div style="margin-top:10px;">
+        <label style="margin-bottom:4px;">${l}</label>
+        <input type="text" placeholder="Same as location" value="${qbCustomerOverrides[l]||''}" data-action="qbcustomeroverride" data-lot="${l}" />
+      </div>
+    `).join('')}
+  </div>`;
 }
 
 function renderPayRates(){
@@ -1805,7 +1846,7 @@ function renderPayRates(){
       const pos = r.positionId ? positions.find(p=>p.id===r.positionId) : null;
       const amount = r.payType==='salary' ? `$${r.rate.toLocaleString()}/yr` : `$${r.rate.toFixed(2)}/hr`;
       return `<div class="row" style="justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);">
-        <span>${r.lot} — ${pos?pos.name:'Any position'}: <strong>${amount}</strong></span>
+        <span>${r.lot} — ${pos?pos.name:'Any position'}: <strong>${amount}</strong>${r.qbPayrollItem?` <span class="empty" style="padding:0;">→ QB: ${r.qbPayrollItem}</span>`:''}</span>
         <button class="danger" data-action="removepayrate" data-id="${r.id}">Remove</button>
       </div>`;
     }).join('') : '<p class="empty" style="padding:0 0 10px;">No pay rates set yet — employees are paid their own base/position wage everywhere.</p>'}
@@ -1824,6 +1865,9 @@ function renderPayRates(){
     </select>
     <label style="margin-top:10px;">Rate</label>
     <input type="number" min="0" step="0.01" id="newRateAmount" placeholder="e.g. 2.50 hourly, or 40000 annual salary" />
+    <label style="margin-top:10px;">QuickBooks payroll item (optional)</label>
+    <input type="text" id="newRateQbItem" list="knownQbItems" placeholder="e.g. Regular Pay — defaults to this if left blank" />
+    <datalist id="knownQbItems">${QB_PAYROLL_ITEMS.map(i=>`<option value="${i}"></option>`).join('')}</datalist>
     <button class="primary" style="width:100%;margin-top:12px;" data-action="addpayrate">Add pay rate</button>
   </div>`;
   return html;
@@ -2002,6 +2046,9 @@ function bindEvents(){
   });
   app.querySelectorAll('[data-action="addpayrate"]').forEach(b=> b.onclick = ()=> addPayRate());
   app.querySelectorAll('[data-action="removepayrate"]').forEach(b=> b.onclick = ()=> removePayRate(b.dataset.id));
+  app.querySelectorAll('[data-action="qbcustomeroverride"]').forEach(el=> el.onchange = ()=>{
+    updateQbCustomerOverride(el.dataset.lot, el.value);
+  });
   app.querySelectorAll('input[name="newPositionColor"]').forEach(radio=>{
     const sync = ()=>{
       app.querySelectorAll('.colorswatch').forEach(sw=>{

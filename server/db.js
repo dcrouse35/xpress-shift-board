@@ -9,7 +9,8 @@ const DB_PATH = path.join(DATA_DIR, 'db.json');
 function defaultData() {
   return {
     employees: [], availability: {}, weeklyAvailability: {}, availabilityChangeLog: [], shifts: [], weekLots: {}, swapRequests: [],
-    admins: [], ptoRequests: [], positions: [], shiftTemplates: [], timeEntries: [], groups: [], payRates: []
+    admins: [], ptoRequests: [], positions: [], shiftTemplates: [], timeEntries: [], groups: [], payRates: [],
+    qbCustomerOverrides: {}
   };
 }
 

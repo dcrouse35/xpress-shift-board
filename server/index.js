@@ -439,7 +439,7 @@ app.get('/api/pay-rates', requireScheduler, (req, res) => {
 });
 
 app.post('/api/pay-rates', requireAdmin, (req, res) => {
-  let { lot, positionId, payType, rate } = req.body || {};
+  let { lot, positionId, payType, rate, qbPayrollItem } = req.body || {};
   lot = (lot || '').trim();
   if (!lot) return res.status(400).json({ error: 'Enter a location.' });
   if (payType !== 'hourly' && payType !== 'salary') return res.status(400).json({ error: 'Invalid pay type.' });
@@ -449,7 +449,7 @@ app.post('/api/pay-rates', requireAdmin, (req, res) => {
     const pos = db.data.positions.find(p => p.id === positionId);
     if (!pos) return res.status(400).json({ error: 'Position not found.' });
   }
-  const entry = { id: uid('rate'), lot, positionId: positionId || null, payType, rate: n };
+  const entry = { id: uid('rate'), lot, positionId: positionId || null, payType, rate: n, qbPayrollItem: (qbPayrollItem || '').trim() || null };
   db.data.payRates.push(entry);
   db.persist();
   res.json({ payRate: entry });
@@ -459,6 +459,27 @@ app.delete('/api/pay-rates/:id', requireAdmin, (req, res) => {
   db.data.payRates = db.data.payRates.filter(r => r.id !== req.params.id);
   db.persist();
   res.json({ ok: true });
+});
+
+// ---------- QuickBooks export settings ----------
+// Most locations export to QuickBooks as a Customer of the exact same name
+// (e.g. "Calvary Baptist Church"). A few venues we host events at often —
+// Apiary, Ashbourne — bill under a different Customer name than the
+// location label we use day-to-day, so this lets an admin override just
+// those without touching the location name used everywhere else in the app.
+app.get('/api/qb-settings', requireScheduler, (req, res) => {
+  res.json({ qbCustomerOverrides: db.data.qbCustomerOverrides });
+});
+
+app.put('/api/qb-settings/customer-override', requireAdmin, (req, res) => {
+  let { lot, qbCustomer } = req.body || {};
+  lot = (lot || '').trim();
+  if (!lot) return res.status(400).json({ error: 'Missing location.' });
+  qbCustomer = (qbCustomer || '').trim();
+  if (qbCustomer) db.data.qbCustomerOverrides[lot] = qbCustomer;
+  else delete db.data.qbCustomerOverrides[lot];
+  db.persist();
+  res.json({ qbCustomerOverrides: db.data.qbCustomerOverrides });
 });
 
 // ---------- groups (labels for filtering/organizing staff, e.g. "Weekend Crew") ----------
@@ -882,6 +903,56 @@ app.get('/api/timesheets', requireScheduler, (req, res) => {
     entries = entries.filter(t => isoSet.has(t.date));
   }
   res.json({ entries });
+});
+
+// A CSV laid out exactly like QuickBooks Time's own entry fields (Customer,
+// Location, Payroll Item) so entering it there is fast copy/paste instead
+// of manual lookups — there's no bulk-import feature in QuickBooks Time
+// itself to target, so this is the practical alternative.
+function qbRateFor(lot, positionId) {
+  let match = db.data.payRates.find(r => r.lot === lot && r.positionId === positionId);
+  if (!match) match = db.data.payRates.find(r => r.lot === lot && !r.positionId);
+  return match || null;
+}
+function csvField(value) {
+  const s = String(value == null ? '' : value);
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+app.get('/api/timesheets/qb-export', requireScheduler, (req, res) => {
+  const weekStart = req.query.weekStart;
+  if (!weekStart) return res.status(400).json({ error: 'Missing weekStart.' });
+  const isoSet = new Set(weekDatesFrom(weekStart).map(toISO));
+  const entries = db.data.timeEntries.filter(t => isoSet.has(t.date));
+
+  const rows = [['Employee', 'Date', 'Customer', 'Location', 'Payroll Item', 'Hours', 'Notes']];
+  entries.forEach(t => {
+    const emp = db.data.employees.find(e => e.id === t.employeeId);
+    const empName = emp ? emp.name : '(removed)';
+    const end = t.clockOut ? new Date(t.clockOut).getTime() : Date.now();
+    const hours = (end - new Date(t.clockIn).getTime()) / 3600000;
+
+    const matchingShifts = db.data.shifts.filter(s => s.date === t.date && (s.employeeIds || []).includes(t.employeeId));
+    let customer = '', location = '', payrollItem = '', notes = '';
+    if (matchingShifts.length === 1) {
+      const shift = matchingShifts[0];
+      location = shift.lot;
+      customer = db.data.qbCustomerOverrides[shift.lot] || shift.lot;
+      const rate = qbRateFor(shift.lot, shift.positionId || null);
+      payrollItem = (rate && rate.qbPayrollItem) || 'Regular Pay';
+    } else if (matchingShifts.length === 0) {
+      notes = 'No matching shift — fill in manually';
+    } else {
+      notes = 'Multiple shifts that day — fill in manually';
+    }
+
+    rows.push([empName, t.date, customer, location, payrollItem, hours.toFixed(2), notes]);
+  });
+
+  const csv = rows.map(r => r.map(csvField).join(',')).join('\r\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="timesheet-${weekStart}.csv"`);
+  res.send(csv);
 });
 
 // Manual entries store a naive "local wall-clock" datetime string (no Z, no
