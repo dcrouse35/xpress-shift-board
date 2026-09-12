@@ -33,15 +33,10 @@ body{
 #app{max-width:720px;margin:0 auto;padding:18px 16px 60px;}
 
 /* header */
-.masthead{display:flex;align-items:center;gap:10px;margin-bottom:18px;}
-.masthead .mark{
-  width:36px;height:36px;border-radius:10px;background:linear-gradient(155deg,var(--brand),var(--brand-dark));
-  color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;flex-shrink:0;
-  box-shadow:0 4px 10px rgba(79,70,229,.28);
-}
+.masthead{display:flex;align-items:center;gap:12px;margin-bottom:18px;}
+.masthead-logo{height:34px;width:auto;flex-shrink:0;}
 .masthead .titles{display:flex;flex-direction:column;}
-.masthead .kicker{font-size:11px;color:var(--ink-muted);font-weight:600;line-height:1.3;}
-.masthead h1{font-size:19px;margin:0;font-weight:800;letter-spacing:-0.02em;line-height:1.25;}
+.masthead h1{font-size:15px;margin:0;font-weight:700;letter-spacing:-0.01em;line-height:1.25;color:var(--ink-muted);}
 
 .tabs{display:flex;gap:4px;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:4px;margin-bottom:18px;box-shadow:var(--shadow);}
 .tab{flex:1;text-align:center;padding:10px 6px;border-radius:11px;font-size:13.5px;font-weight:700;color:var(--ink-muted);cursor:pointer;user-select:none;border:none;background:transparent;font-family:var(--font);transition:background .15s,color .15s;}
@@ -52,12 +47,13 @@ body{
 .row{display:flex;gap:8px;align-items:center;}
 .row + .row{margin-top:8px;}
 
-select, input[type=text], input[type=password]{
+select, input[type=text], input[type=password], input[type=date]{
   width:100%;padding:12px 13px;border:1.5px solid var(--line-strong);border-radius:var(--radius-md);
   font-size:15px;font-family:var(--font);background:#FBFBFE;color:var(--ink);
   transition:border-color .15s;
 }
-select:focus, input[type=text]:focus, input[type=password]:focus{outline:none;border-color:var(--brand);background:#fff;}
+select:focus, input[type=text]:focus, input[type=password]:focus, input[type=date]:focus{outline:none;border-color:var(--brand);background:#fff;}
+input[type=checkbox]{width:16px;height:16px;flex-shrink:0;}
 label{font-size:12px;font-weight:700;color:var(--ink-muted);display:block;margin-bottom:6px;}
 
 button.primary{

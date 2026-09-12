@@ -7,7 +7,10 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 
 function defaultData() {
-  return { employees: [], availability: {}, shifts: [], weekLots: {}, swapRequests: [] };
+  return {
+    employees: [], availability: {}, shifts: [], weekLots: {}, swapRequests: [],
+    admins: [], ptoRequests: []
+  };
 }
 
 function ensureDir() {

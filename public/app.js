@@ -2,23 +2,30 @@ const { LOTS, EMP_HOME_TAGS, STATE_ORDER, STATE_LABEL, DAILY_TEMPLATES, slotAppl
 
 let employees = [];
 let availability = {}; // { employeeId: { 'YYYY-MM-DD': state } }
-let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, end, draft} ]
+let shifts = []; // [ {id, date, employeeIds, lot, slotId?, customName?, start, end, draft, open?} ]
 let swapRequests = []; // [ {id, shiftId, fromEmployeeId, toEmployeeId, createdAt} ]
-let swapError = null;
-let role = "employee"; // employee | schedule | manager
-let me = null; // current logged-in employee (sanitized, no password)
-let currentEmployeeId = null;
-let loggedInId = null;
+let ptoRequests = []; // [ {id, employeeId, startDate, endDate, reason, status, createdAt} ]
+
+let me = null;    // logged-in staff identity (sanitized), or null
+let admin = null; // logged-in admin identity (sanitized), or null
+let authView = 'staff'; // which gate form shows when nobody is logged in: 'staff' | 'admin'
+let staffTab = 'my';     // 'my' | 'schedule' | 'timeoff'
+let adminTab = 'schedule'; // 'schedule' | 'staff' | 'timeoff'
+
 let managerLot = LOTS[0];
 let editingShiftId = null;
 let addShiftError = null;
 let signupError = null;
 let loginError = null;
+let adminSignupError = null;
+let adminLoginError = null;
 let importResultMsg = null;
 let weekOffset = 0; // 0 = this week
-let openDayKey = null; // for manager breakdown panel
+let openDayKey = null; // for admin breakdown panel
 let loaded = false;
 let loadError = null;
+let swapError = null;
+let ptoError = null;
 
 function icon(name){
   if(name==="available") return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11v10H4a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1h3zm0 0 4.5-8a2 2 0 0 1 3.8.9L14.5 9H19a2 2 0 0 1 2 2.3l-1.4 8A3 3 0 0 1 16.6 22H10a3 3 0 0 1-3-3"/></svg>';
@@ -72,21 +79,28 @@ async function api(path, opts){
 
 async function loadAll(){
   try{
-    const [empRes, availRes, shiftRes, meRes, swapRes] = await Promise.all([
-      api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/me'), api('/api/swaps')
-    ]);
-    employees = empRes.employees;
-    availability = availRes.availability;
-    shifts = shiftRes.shifts;
+    const meRes = await api('/api/me');
     me = meRes.employee;
-    currentEmployeeId = me ? me.id : null;
-    loggedInId = currentEmployeeId;
-    swapRequests = swapRes.swaps;
+    admin = meRes.admin;
+    if(me || admin){
+      await loadProtectedData();
+    }
   }catch(e){
     loadError = "Couldn't load the shift board — check your connection and reload.";
   }
   loaded = true;
   render();
+}
+
+async function loadProtectedData(){
+  const [empRes, availRes, shiftRes, swapRes, ptoRes] = await Promise.all([
+    api('/api/employees'), api('/api/availability'), api('/api/shifts'), api('/api/swaps'), api('/api/pto')
+  ]);
+  employees = empRes.employees;
+  availability = availRes.availability;
+  shifts = shiftRes.shifts;
+  swapRequests = swapRes.swaps;
+  ptoRequests = ptoRes.requests;
 }
 
 async function setDayState(empId, dateISO, newState){
@@ -104,6 +118,7 @@ function cycleState(current){
   return STATE_ORDER[(idx+1) % STATE_ORDER.length];
 }
 
+// ---------- staff auth ----------
 async function addEmployee(name, email, phone, password, passwordConfirm){
   name = (name||'').trim();
   email = (email||'').trim();
@@ -117,11 +132,9 @@ async function addEmployee(name, email, phone, password, passwordConfirm){
   try{
     const res = await api('/api/auth/signup', { method:'POST', body: JSON.stringify({name,email,phone,password,passwordConfirm}) });
     me = res.employee;
-    currentEmployeeId = me.id;
-    loggedInId = me.id;
+    admin = null;
     signupError = null;
-    const empRes = await api('/api/employees');
-    employees = empRes.employees;
+    await loadProtectedData();
   }catch(e){ signupError = e.message; }
   render();
 }
@@ -130,19 +143,40 @@ async function loginEmployee(email, password){
   try{
     const res = await api('/api/auth/login', { method:'POST', body: JSON.stringify({email,password}) });
     me = res.employee;
-    currentEmployeeId = me.id;
-    loggedInId = me.id;
+    admin = null;
     loginError = null;
+    await loadProtectedData();
   }catch(e){ loginError = e.message; }
   render();
 }
 
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
-  me = null;
-  currentEmployeeId = null;
-  loggedInId = null;
-  loginError = null;
+  me = null; admin = null; loginError = null; adminLoginError = null;
+  employees = []; availability = {}; shifts = []; swapRequests = []; ptoRequests = [];
+  render();
+}
+
+// ---------- admin auth ----------
+async function adminSignup(name, email, password, passwordConfirm, inviteCode){
+  try{
+    const res = await api('/api/admin/signup', { method:'POST', body: JSON.stringify({name,email,password,passwordConfirm,inviteCode}) });
+    admin = res.admin;
+    me = null;
+    adminSignupError = null;
+    await loadProtectedData();
+  }catch(e){ adminSignupError = e.message; }
+  render();
+}
+
+async function adminLogin(email, password){
+  try{
+    const res = await api('/api/admin/login', { method:'POST', body: JSON.stringify({email,password}) });
+    admin = res.admin;
+    me = null;
+    adminLoginError = null;
+    await loadProtectedData();
+  }catch(e){ adminLoginError = e.message; }
   render();
 }
 
@@ -239,6 +273,57 @@ function describeShift(shift){
   return `${label} · ${fmtDayName(d)}, ${fmtDayShort(d)} · ${fmt12(shift.start)}–${fmt12(shift.end)}`;
 }
 
+// ---------- open shift board ----------
+async function claimShift(shiftId){
+  try{
+    const res = await api(`/api/shifts/${shiftId}/claim`, { method:'POST' });
+    const idx = shifts.findIndex(s=>s.id===res.shift.id);
+    if(idx>=0) shifts[idx] = res.shift;
+    swapError = null;
+  }catch(e){ swapError = e.message; }
+  render();
+}
+
+// ---------- time off (PTO) ----------
+async function submitPto(){
+  const startDate = (document.getElementById('ptoStart')||{}).value;
+  const endDate = (document.getElementById('ptoEnd')||{}).value;
+  const reason = ((document.getElementById('ptoReason')||{}).value || '').trim();
+  if(!startDate || !endDate){ ptoError = "Pick a start and end date."; render(); return; }
+  try{
+    const res = await api('/api/pto', { method:'POST', body: JSON.stringify({ startDate, endDate, reason }) });
+    ptoRequests.push(res.request);
+    ptoError = null;
+  }catch(e){ ptoError = e.message; }
+  render();
+}
+async function cancelPto(id){
+  try{
+    await api(`/api/pto/${id}`, { method:'DELETE' });
+    ptoRequests = ptoRequests.filter(r=>r.id!==id);
+  }catch(e){ ptoError = e.message; }
+  render();
+}
+async function approvePto(id){
+  try{
+    const res = await api(`/api/pto/${id}/approve`, { method:'POST' });
+    const idx = ptoRequests.findIndex(r=>r.id===id);
+    if(idx>=0) ptoRequests[idx] = res.request;
+    const availRes = await api('/api/availability');
+    availability = availRes.availability;
+  }catch(e){ ptoError = e.message; }
+  render();
+}
+async function denyPto(id){
+  try{
+    const res = await api(`/api/pto/${id}/deny`, { method:'POST' });
+    const idx = ptoRequests.findIndex(r=>r.id===id);
+    if(idx>=0) ptoRequests[idx] = res.request;
+  }catch(e){ ptoError = e.message; }
+  render();
+}
+function fmtDateShort(iso){ return new Date(iso+'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
+
 // ---------- shifts ----------
 function getShiftEmployeeIds(s){ return s.employeeIds || []; }
 
@@ -255,6 +340,7 @@ async function submitCustomShift(){
   const startInput = document.getElementById('newShiftStart');
   const endInput = document.getElementById('newShiftEnd');
   const assignSelect = document.getElementById('newShiftAssign');
+  const openCheckbox = document.getElementById('newShiftOpen');
   if(!locSelect || !dateSelect) return;
 
   let lot = locSelect.value;
@@ -269,11 +355,12 @@ async function submitCustomShift(){
   const date = dateSelect.value;
   const start = startInput.value || '09:00';
   const end = endInput.value || '17:00';
-  const employeeId = assignSelect && assignSelect.value ? assignSelect.value : null;
+  const open = openCheckbox ? openCheckbox.checked : false;
+  const employeeId = (!open && assignSelect && assignSelect.value) ? assignSelect.value : null;
   const customName = nameInput ? nameInput.value.trim() : '';
 
   try{
-    const res = await api('/api/shifts', { method:'POST', body: JSON.stringify({ date, lot, customName: customName || null, start, end, employeeId }) });
+    const res = await api('/api/shifts', { method:'POST', body: JSON.stringify({ date, lot, customName: customName || null, start, end, employeeId, open }) });
     shifts.push(res.shift);
     addShiftError = null;
   }catch(e){ addShiftError = e.message; }
@@ -358,151 +445,191 @@ function el(html){
   return t.content.firstElementChild;
 }
 
+// ---------- top-level render ----------
 function render(){
   const app = document.getElementById('app');
   if(!loaded){ app.innerHTML = '<div class="loading">Loading shift board…</div>'; return; }
 
   let html = '';
-  html += `<div class="masthead"><div class="mark">X</div><div class="titles"><div class="kicker">Xpress Parking Services</div><h1>Shift Board</h1></div></div>`;
+  html += `<div class="masthead"><img class="masthead-logo" src="/assets/logo-black.png" alt="Xpress Parking" /><div class="titles"><h1>Shift Board</h1></div></div>`;
 
   if(loadError){
     html += `<div class="err">${loadError}</div>`;
   }
 
-  html += `<div class="tabs">
-    <button class="tab ${role==='employee'?'active':''}" data-action="setrole" data-role="employee">I'm Staff</button>
-    <button class="tab ${role==='schedule'?'active':''}" data-action="setrole" data-role="schedule">Schedule</button>
-    <button class="tab ${role==='manager'?'active':''}" data-action="setrole" data-role="manager">Availability</button>
-  </div>`;
-
-  if(role==='employee'){
-    html += renderEmployeeView();
-  } else if(role==='schedule'){
-    html += renderScheduleView();
+  if(!me && !admin){
+    html += renderGate();
+  } else if(admin){
+    html += renderAdminApp();
   } else {
-    html += renderManagerView();
+    html += renderStaffApp();
   }
 
-  html += `<div class="footnote">Anyone with this link can view schedules and availability for the whole team. Staff sign in with their own email and password to set their own availability — there's no further access control, so don't put anything here you wouldn't want a coworker to see.</div>`;
+  html += `<div class="footnote">${admin || me ? 'You\'re signed in — log out to switch accounts.' : 'Sign in to see schedules and availability.'} There\'s no further access control beyond staff vs. admin, so don\'t put anything here you wouldn\'t want a coworker to see.</div>`;
 
   app.innerHTML = html;
   bindEvents();
 }
 
-function renderEmployeeView(){
-  let html = '';
-
-  if(loginError){
-    html += `<div class="err">${loginError}</div>`;
-  }
-
-  html += `<div class="card">
-    <h2>Log in</h2>
-    <div class="field">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 6 10-6"/></svg>
-      <input type="text" id="loginEmail" placeholder="Email" />
-    </div>
-    <div class="field" style="margin-top:10px;">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      <input type="password" id="loginPassword" placeholder="Password" />
-    </div>
-    <button class="primary" style="width:100%;margin-top:12px;" id="loginBtn">Log in</button>
+function renderGate(){
+  let html = `<div class="tabs">
+    <button class="tab ${authView==='staff'?'active':''}" data-action="setauthview" data-view="staff">Staff</button>
+    <button class="tab ${authView==='admin'?'active':''}" data-action="setauthview" data-view="admin">Admin</button>
   </div>`;
 
-  if(signupError){
-    html += `<div class="err">${signupError}</div>`;
-  }
-
-  html += `<div class="card" style="padding:18px;">
-    <div class="signup-banner">
-      <div class="signup-banner-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg></div>
-      <div>
-        <div class="signup-banner-title">Join the team</div>
-        <div class="signup-banner-sub">New hire or already on the roster — start here</div>
+  if(authView==='staff'){
+    if(loginError) html += `<div class="err">${loginError}</div>`;
+    html += `<div class="card">
+      <h2>Log in</h2>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 6 10-6"/></svg>
+        <input type="text" id="loginEmail" placeholder="Email" />
       </div>
-    </div>
+      <div class="field" style="margin-top:10px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input type="password" id="loginPassword" placeholder="Password" />
+      </div>
+      <button class="primary" style="width:100%;margin-top:12px;" id="loginBtn">Log in</button>
+    </div>`;
 
-    <div class="formsection">Your info</div>
-    <div class="field">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-      <input type="text" id="newEmpName" placeholder="Full name" />
-    </div>
-    <div class="field">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 6 10-6"/></svg>
-      <input type="text" id="newEmpEmail" placeholder="Email" />
-    </div>
-    <div class="field">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
-      <input type="text" id="newEmpPhone" placeholder="Phone number" />
-    </div>
+    if(signupError) html += `<div class="err">${signupError}</div>`;
+    html += `<div class="card" style="padding:18px;">
+      <div class="signup-banner">
+        <div class="signup-banner-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg></div>
+        <div>
+          <div class="signup-banner-title">Join the team</div>
+          <div class="signup-banner-sub">New hire or already on the roster — start here</div>
+        </div>
+      </div>
 
-    <div class="formsection">Create a password</div>
-    <p class="empty" style="padding:0 0 8px;">You'll use your email and this password to log in each time.</p>
-    <div class="field">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      <input type="password" id="newEmpPassword" placeholder="Password (6+ characters)" />
-    </div>
-    <div class="field">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      <input type="password" id="newEmpPasswordConfirm" placeholder="Confirm password" />
-    </div>
+      <div class="formsection">Your info</div>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <input type="text" id="newEmpName" placeholder="Full name" />
+      </div>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 6 10-6"/></svg>
+        <input type="text" id="newEmpEmail" placeholder="Email" />
+      </div>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        <input type="text" id="newEmpPhone" placeholder="Phone number" />
+      </div>
 
-    <button class="primary" style="width:100%;margin-top:14px;" id="addEmpBtn">Sign up</button>
-  </div>`;
+      <div class="formsection">Create a password</div>
+      <p class="empty" style="padding:0 0 8px;">You'll use your email and this password to log in each time.</p>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input type="password" id="newEmpPassword" placeholder="Password (6+ characters)" />
+      </div>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input type="password" id="newEmpPasswordConfirm" placeholder="Confirm password" />
+      </div>
 
-  if(!currentEmployeeId){
-    html += '<div class="card"><p class="empty">Log in or sign up above to see and set your availability.</p></div>';
-    return html;
+      <button class="primary" style="width:100%;margin-top:14px;" id="addEmpBtn">Sign up</button>
+    </div>`;
+  } else {
+    if(adminLoginError) html += `<div class="err">${adminLoginError}</div>`;
+    html += `<div class="card">
+      <h2>Admin log in</h2>
+      <div class="field">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 7l10 6 10-6"/></svg>
+        <input type="text" id="adminLoginEmail" placeholder="Email" />
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <input type="password" id="adminLoginPassword" placeholder="Password" />
+      </div>
+      <button class="primary" style="width:100%;margin-top:12px;" id="adminLoginBtn">Log in</button>
+    </div>`;
+
+    if(adminSignupError) html += `<div class="err">${adminSignupError}</div>`;
+    html += `<div class="card">
+      <h2>New admin sign up</h2>
+      <p class="empty" style="padding:0 0 10px;">Requires the admin invite code — ask whoever set up this board.</p>
+      <label>Full name</label>
+      <input type="text" id="adminName" />
+      <label style="margin-top:10px;">Email</label>
+      <input type="text" id="adminEmail" />
+      <label style="margin-top:10px;">Password</label>
+      <input type="password" id="adminPassword" placeholder="6+ characters" />
+      <label style="margin-top:10px;">Confirm password</label>
+      <input type="password" id="adminPasswordConfirm" />
+      <label style="margin-top:10px;">Invite code</label>
+      <input type="password" id="adminInviteCode" />
+      <button class="primary" style="width:100%;margin-top:12px;" id="adminSignupBtn">Create admin account</button>
+    </div>`;
   }
 
-  const emp = employees.find(e=>e.id===currentEmployeeId);
-  if(!emp){ currentEmployeeId=null; return renderEmployeeView(); }
+  return html;
+}
+
+// ================= STAFF-FACING APP =================
+function renderStaffApp(){
+  const emp = employees.find(e=>e.id===me.id) || me;
 
   if(!emp.onboarded){
-    const onboardDates = getWeekDates(0);
-    const empAvailOnboard = availability[emp.id] || {};
-    const allSet = onboardDates.every(d=> !!empAvailOnboard[toISO(d)]);
-
-    html += `<div class="card">
-      <h2>One last step — your availability</h2>
-      <p class="empty" style="padding:0 0 8px;">Hi ${emp.name} — set your status for each day this week so we know when you can work. You can always change this later.</p>
-    </div>`;
-
-    html += '<div class="card">';
-    onboardDates.forEach(d=>{
-      const iso = toISO(d);
-      const state = empAvailOnboard[iso] || null;
-      const cls = state ? state : '';
-      const label = state ? STATE_LABEL[state] : 'Tap to set';
-      html += `<div class="daytile">
-        <div class="dinfo"><div class="dname">${fmtDayName(d)}</div><div class="ddate">${fmtDayShort(d)}</div></div>
-        <button class="statebtn ${cls}" data-action="toggleday" data-date="${iso}">${icon(state)}<span>${label}</span></button>
-      </div>`;
-    });
-    html += '</div>';
-
-    if(!allSet){
-      html += `<div class="card"><p class="empty" style="padding:0;">Set a status for all 7 days to finish signing up.</p></div>`;
-    }
-    html += `<div class="card">
-      <button class="primary" style="width:100%;" data-action="finishonboarding" ${allSet?'':'disabled'}>Finish sign up</button>
-    </div>`;
-    return html;
+    return renderOnboarding(emp);
   }
 
-  html += `<div class="card" style="background:var(--go-bg);border-color:var(--go);">
+  let html = `<div class="card" style="background:var(--go-bg);border-color:var(--go);">
     <div class="row" style="justify-content:space-between;">
       <span style="font-weight:800;color:var(--go);">Logged in as ${emp.name}</span>
       <button class="ghost" data-action="logout">Log out</button>
     </div>
   </div>`;
 
-  if(signupError){
-    html += `<div class="err">${signupError}</div>`;
+  html += `<div class="tabs">
+    <button class="tab ${staffTab==='my'?'active':''}" data-action="setstafftab" data-tab="my">My Schedule</button>
+    <button class="tab ${staffTab==='schedule'?'active':''}" data-action="setstafftab" data-tab="schedule">Full Schedule</button>
+    <button class="tab ${staffTab==='timeoff'?'active':''}" data-action="setstafftab" data-tab="timeoff">Time Off</button>
+  </div>`;
+
+  if(staffTab==='my') html += renderMySchedule(emp);
+  else if(staffTab==='schedule') html += renderScheduleView({ readOnly:true });
+  else html += renderTimeOffStaff(emp);
+
+  return html;
+}
+
+function renderOnboarding(emp){
+  const onboardDates = getWeekDates(0);
+  const empAvailOnboard = availability[emp.id] || {};
+  const allSet = onboardDates.every(d=> !!empAvailOnboard[toISO(d)]);
+
+  let html = `<div class="card">
+    <h2>One last step — your availability</h2>
+    <p class="empty" style="padding:0 0 8px;">Hi ${emp.name} — set your status for each day this week so we know when you can work. You can always change this later.</p>
+  </div>`;
+
+  html += '<div class="card">';
+  onboardDates.forEach(d=>{
+    const iso = toISO(d);
+    const state = empAvailOnboard[iso] || null;
+    const cls = state ? state : '';
+    const label = state ? STATE_LABEL[state] : 'Tap to set';
+    html += `<div class="daytile">
+      <div class="dinfo"><div class="dname">${fmtDayName(d)}</div><div class="ddate">${fmtDayShort(d)}</div></div>
+      <button class="statebtn ${cls}" data-action="toggleday" data-date="${iso}">${icon(state)}<span>${label}</span></button>
+    </div>`;
+  });
+  html += '</div>';
+
+  if(!allSet){
+    html += `<div class="card"><p class="empty" style="padding:0;">Set a status for all 7 days to finish signing up.</p></div>`;
   }
-  if(swapError){
-    html += `<div class="err">${swapError}</div>`;
-  }
+  html += `<div class="card">
+    <button class="primary" style="width:100%;" data-action="finishonboarding" ${allSet?'':'disabled'}>Finish sign up</button>
+  </div>
+  <div class="card"><button class="ghost" style="width:100%;" data-action="logout">Log out</button></div>`;
+  return html;
+}
+
+function renderMySchedule(emp){
+  let html = '';
+  if(signupError) html += `<div class="err">${signupError}</div>`;
+  if(swapError) html += `<div class="err">${swapError}</div>`;
 
   const incoming = swapRequests.filter(r=>r.toEmployeeId===emp.id);
   if(incoming.length){
@@ -556,7 +683,6 @@ function renderEmployeeView(){
   });
   html += `</div>`;
 
-  // live summary list
   html += `<div class="card"><h2>Your availability this week</h2>`;
   const empAvail = availability[emp.id] || {};
   const anySet = dates.some(d=>empAvail[toISO(d)]);
@@ -602,10 +728,134 @@ function renderEmployeeView(){
   }
   html += `</div>`;
 
+  const todayIso = toISO(new Date());
+  const openShifts = shifts.filter(s=>s.open && !getShiftEmployeeIds(s).length && s.date>=todayIso)
+                            .filter(s=>{
+                              const st = (availability[emp.id]||{})[s.date];
+                              return st !== 'unavailable';
+                            })
+                            .sort((a,b)=> a.date===b.date ? a.start.localeCompare(b.start) : a.date.localeCompare(b.date));
+  html += `<div class="card"><h2>Open shifts</h2>`;
+  if(!openShifts.length){
+    html += `<p class="empty">No open shifts posted right now.</p>`;
+  } else {
+    html += openShifts.map(s=>`
+      <div class="staffcard">
+        <div style="font-weight:700;margin-bottom:8px;">${describeShift(s)}</div>
+        <button class="primary" style="width:100%;" data-action="claimshift" data-id="${s.id}">Claim this shift</button>
+      </div>
+    `).join('');
+  }
+  html += `</div>`;
+
   return html;
 }
 
-function renderScheduleView(){
+function ptoStatusTag(status){
+  const cls = status==='approved' ? 'available' : status==='denied' ? 'unavailable' : 'unset';
+  const label = status.charAt(0).toUpperCase()+status.slice(1);
+  return `<span class="tag ${cls}">${label}</span>`;
+}
+
+function renderTimeOffStaff(emp){
+  let html = '';
+  if(ptoError) html += `<div class="err">${ptoError}</div>`;
+
+  html += `<div class="card">
+    <h2>Request time off</h2>
+    <label>Start date</label>
+    <input type="date" id="ptoStart" />
+    <label style="margin-top:10px;">End date</label>
+    <input type="date" id="ptoEnd" />
+    <label style="margin-top:10px;">Reason (optional)</label>
+    <input type="text" id="ptoReason" placeholder="e.g. Family trip" />
+    <button class="primary" style="width:100%;margin-top:12px;" data-action="submitpto">Submit request</button>
+  </div>`;
+
+  const mine = ptoRequests.filter(r=>r.employeeId===emp.id).sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  html += `<div class="card"><h2>Your requests</h2>`;
+  if(!mine.length){
+    html += `<p class="empty">No time-off requests yet.</p>`;
+  } else {
+    html += mine.map(r=>`
+      <div class="staffcard">
+        <div class="row" style="justify-content:space-between;">
+          <span style="font-weight:700;">${fmtDateShort(r.startDate)} – ${fmtDateShort(r.endDate)}</span>
+          ${ptoStatusTag(r.status)}
+        </div>
+        ${r.reason ? `<div class="staffcard-status" style="margin-top:6px;">${r.reason}</div>` : ''}
+        ${r.status==='pending' ? `<button class="danger" style="width:100%;margin-top:10px;" data-action="cancelpto" data-id="${r.id}">Cancel request</button>` : ''}
+      </div>
+    `).join('');
+  }
+  html += `</div>`;
+
+  return html;
+}
+
+// ================= ADMIN APP =================
+function renderAdminApp(){
+  let html = `<div class="card" style="background:var(--brand-bg);border-color:var(--brand);">
+    <div class="row" style="justify-content:space-between;">
+      <span style="font-weight:800;color:var(--brand);">Admin: ${admin.name}</span>
+      <button class="ghost" data-action="logout">Log out</button>
+    </div>
+  </div>`;
+
+  html += `<div class="tabs">
+    <button class="tab ${adminTab==='schedule'?'active':''}" data-action="setadmintab" data-tab="schedule">Schedule</button>
+    <button class="tab ${adminTab==='staff'?'active':''}" data-action="setadmintab" data-tab="staff">Staff &amp; Availability</button>
+    <button class="tab ${adminTab==='timeoff'?'active':''}" data-action="setadmintab" data-tab="timeoff">Time Off</button>
+  </div>`;
+
+  if(adminTab==='schedule') html += renderScheduleView({ readOnly:false });
+  else if(adminTab==='staff') html += renderManagerView();
+  else html += renderTimeOffAdmin();
+
+  return html;
+}
+
+function renderTimeOffAdmin(){
+  let html = '';
+  if(ptoError) html += `<div class="err">${ptoError}</div>`;
+
+  const pending = ptoRequests.filter(r=>r.status==='pending').sort((a,b)=>a.startDate.localeCompare(b.startDate));
+  const resolved = ptoRequests.filter(r=>r.status!=='pending').sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+
+  html += `<div class="card"><h2>Pending requests</h2>`;
+  if(!pending.length){
+    html += `<p class="empty">Nothing pending.</p>`;
+  } else {
+    html += pending.map(r=>{
+      const e = employees.find(x=>x.id===r.employeeId);
+      return `<div class="staffcard">
+        <div style="font-weight:700;">${e?e.name:'(removed)'}</div>
+        <div class="staffcard-status" style="margin-top:2px;">${fmtDateShort(r.startDate)} – ${fmtDateShort(r.endDate)}${r.reason ? ' · '+r.reason : ''}</div>
+        <div class="row" style="margin-top:10px;">
+          <button class="primary" style="flex:1;" data-action="approvepto" data-id="${r.id}">Approve</button>
+          <button class="ghost" style="flex:1;" data-action="denypto" data-id="${r.id}">Deny</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+  html += `</div>`;
+
+  html += `<div class="card"><h2>History</h2>`;
+  if(!resolved.length){
+    html += `<p class="empty">No resolved requests yet.</p>`;
+  } else {
+    html += resolved.map(r=>{
+      const e = employees.find(x=>x.id===r.employeeId);
+      return `<div class="summaryline"><span>${e?e.name:'(removed)'} · ${fmtDateShort(r.startDate)}–${fmtDateShort(r.endDate)}</span>${ptoStatusTag(r.status)}</div>`;
+    }).join('');
+  }
+  html += `</div>`;
+
+  return html;
+}
+
+function renderScheduleView(opts){
+  const readOnly = !!(opts && opts.readOnly);
   const dates = getWeekDates(weekOffset);
   const weekIso = dates.map(toISO);
 
@@ -621,10 +871,12 @@ function renderScheduleView(){
 
   html += `<div class="card" style="padding:12px 8px;">
     <h2 style="padding:0 8px;">This Week's Schedule</h2>
-    <p class="empty" style="padding:0 8px 6px;">Tony's + Dudley's fixed shifts, plus any events or church lots you add below — all sorted by start time, per day.</p>
+    <p class="empty" style="padding:0 8px 6px;">Tony's + Dudley's fixed shifts, plus any events or church lots — all sorted by start time, per day.</p>
   </div>`;
 
-  html += renderDailyColumns(dates);
+  html += renderDailyColumns(dates, readOnly);
+
+  if(readOnly) return html;
 
   if(addShiftError){
     html += `<div class="err">${addShiftError}</div>`;
@@ -660,6 +912,11 @@ function renderScheduleView(){
     <label style="margin-top:10px;">Assign to (optional)</label>
     <select id="newShiftAssign">${slotOptionsHtml(toISO(dates[0]), '')}</select>
 
+    <div class="row" style="margin-top:10px;align-items:center;">
+      <input type="checkbox" id="newShiftOpen" style="width:auto;" />
+      <label style="margin:0;" for="newShiftOpen">Leave unassigned and post as open (any available staff can claim it)</label>
+    </div>
+
     <button class="primary" style="width:100%;margin-top:12px;" data-action="addcustomshift">Add shift</button>
   </div>`;
 
@@ -675,6 +932,7 @@ function renderScheduleView(){
     const found = findShift(editingShiftId);
     if(found){
       const d = new Date(found.dateISO+'T00:00:00');
+      const isUnfilled = getShiftEmployeeIds(found.shift).length===0;
       html += `<div class="card">
         <h2>Edit shift</h2>
         <p class="empty" style="padding:0 0 10px;">${found.shift.lot} · ${fmtDayName(d)}, ${fmtDayShort(d)}</p>
@@ -686,6 +944,10 @@ function renderScheduleView(){
             <input type="time" value="${found.shift.start}" data-action="shifttime" data-field="start" data-shiftid="${found.shift.id}" />
             <input type="time" value="${found.shift.end}" data-action="shifttime" data-field="end" data-shiftid="${found.shift.id}" />
           </div>
+          ${isUnfilled ? `<div class="row" style="margin-top:10px;align-items:center;">
+            <input type="checkbox" id="editShiftOpen" style="width:auto;" data-action="toggleopen" data-shiftid="${found.shift.id}" ${found.shift.open?'checked':''} />
+            <label style="margin:0;" for="editShiftOpen">Open for pickup</label>
+          </div>` : ''}
           <div class="actions">
             <button class="ghost" data-action="closeedit">Done</button>
             <button class="danger" data-action="deleteshift" data-shiftid="${found.shift.id}">Remove shift</button>
@@ -713,7 +975,7 @@ function slotOptionsHtml(iso, assignedId){
   return options;
 }
 
-function renderDailyColumns(dates){
+function renderDailyColumns(dates, readOnly){
   const locationClass = { "Tony's":"tonys", "Dudley's":"dudleys" };
 
   const columns = dates.map(d=>{
@@ -735,27 +997,33 @@ function renderDailyColumns(dates){
         const { location, slot } = row;
         const s = shifts.find(x=>x.date===iso && x.lot===location && x.slotId===slot.id);
         const assignedId = s ? (getShiftEmployeeIds(s)[0] || '') : '';
+        const assignedEmp = assignedId ? employees.find(e=>e.id===assignedId) : null;
         return `<div class="slotrow ${locationClass[location]||''}">
           <div class="slabel">${location} — ${slot.label}</div>
           <div class="stime3">${fmt12(slot.start)}–${fmt12(slot.end)}</div>
-          <select class="slotselect ${s&&s.draft?'draft':''}" data-action="slotassign" data-date="${iso}" data-lot="${location}" data-slotid="${slot.id}" data-start="${slot.start}" data-end="${slot.end}">
-            ${slotOptionsHtml(iso, assignedId)}
-          </select>
+          ${readOnly
+            ? `<div class="empty" style="padding:2px 0 0;">${assignedEmp ? assignedEmp.name : 'Unfilled'}</div>`
+            : `<select class="slotselect ${s&&s.draft?'draft':''}" data-action="slotassign" data-date="${iso}" data-lot="${location}" data-slotid="${slot.id}" data-start="${slot.start}" data-end="${slot.end}">
+                ${slotOptionsHtml(iso, assignedId)}
+              </select>`}
         </div>`;
       } else {
         const s = row.shift;
         const ids = getShiftEmployeeIds(s);
+        const names = ids.map(id=>{ const e = employees.find(x=>x.id===id); return e?e.name:'(removed)'; });
         const chipsInline = ids.map(id=>{
           const e = employees.find(x=>x.id===id);
           return `<span class="achip achip-sm">${e?e.name:'(removed)'} <button type="button" data-action="removeassignee" data-shiftid="${s.id}" data-empid="${id}">×</button></span>`;
         }).join('');
         return `<div class="slotrow ${locationClass[row.location]||''}">
-          <div class="slabel" data-action="editshift" data-shiftid="${s.id}" style="cursor:pointer;">${row.location}${s.customName? ' — '+s.customName : ' — Extra shift'}</div>
+          <div class="slabel" ${readOnly?'':`data-action="editshift" data-shiftid="${s.id}" style="cursor:pointer;"`}>${row.location}${s.customName? ' — '+s.customName : ' — Extra shift'}${s.open && !ids.length ? ' <span class="tag unset">OPEN</span>' : ''}</div>
           <div class="stime3">${fmt12(s.start)}–${fmt12(s.end)}${s.draft?' · Draft':''}</div>
-          ${chipsInline ? `<div class="assignedchips" style="margin-bottom:6px;">${chipsInline}</div>` : ''}
-          <select class="slotselect" data-action="addassignee" data-shiftid="${s.id}">
-            ${addAssigneeOptionsHtml(iso, ids)}
-          </select>
+          ${readOnly
+            ? `<div class="empty" style="padding:2px 0 0;">${names.length ? names.join(', ') : (s.open ? 'Open for pickup' : 'Unfilled')}</div>`
+            : `${chipsInline ? `<div class="assignedchips" style="margin-bottom:6px;">${chipsInline}</div>` : ''}
+              <select class="slotselect" data-action="addassignee" data-shiftid="${s.id}">
+                ${addAssigneeOptionsHtml(iso, ids)}
+              </select>`}
         </div>`;
       }
     }).join('');
@@ -883,8 +1151,9 @@ function renderGroup(key, title, names){
 function bindEvents(){
   const app = document.getElementById('app');
 
-  const roleBtns = app.querySelectorAll('[data-action="setrole"]');
-  roleBtns.forEach(b=> b.onclick = ()=>{ role = b.dataset.role; openDayKey=null; render(); });
+  app.querySelectorAll('[data-action="setauthview"]').forEach(b=> b.onclick = ()=>{ authView = b.dataset.view; render(); });
+  app.querySelectorAll('[data-action="setstafftab"]').forEach(b=> b.onclick = ()=>{ staffTab = b.dataset.tab; openDayKey=null; render(); });
+  app.querySelectorAll('[data-action="setadmintab"]').forEach(b=> b.onclick = ()=>{ adminTab = b.dataset.tab; openDayKey=null; render(); });
 
   const loginBtn = app.querySelector('#loginBtn');
   if(loginBtn) loginBtn.onclick = ()=>{
@@ -901,6 +1170,22 @@ function bindEvents(){
     const password = app.querySelector('#newEmpPassword').value;
     const passwordConfirm = app.querySelector('#newEmpPasswordConfirm').value;
     addEmployee(name, email, phone, password, passwordConfirm);
+  };
+
+  const adminLoginBtn = app.querySelector('#adminLoginBtn');
+  if(adminLoginBtn) adminLoginBtn.onclick = ()=>{
+    const email = app.querySelector('#adminLoginEmail').value;
+    const password = app.querySelector('#adminLoginPassword').value;
+    adminLogin(email, password);
+  };
+  const adminSignupBtn = app.querySelector('#adminSignupBtn');
+  if(adminSignupBtn) adminSignupBtn.onclick = ()=>{
+    const name = app.querySelector('#adminName').value;
+    const email = app.querySelector('#adminEmail').value;
+    const password = app.querySelector('#adminPassword').value;
+    const passwordConfirm = app.querySelector('#adminPasswordConfirm').value;
+    const inviteCode = app.querySelector('#adminInviteCode').value;
+    adminSignup(name, email, password, passwordConfirm, inviteCode);
   };
 
   app.querySelectorAll('[data-action="logout"]').forEach(b=> b.onclick = ()=> logoutEmployee());
@@ -922,6 +1207,12 @@ function bindEvents(){
     if(!sel.value) return;
     requestSwap(sel.dataset.shiftid, sel.value);
   });
+  app.querySelectorAll('[data-action="claimshift"]').forEach(b=> b.onclick = ()=> claimShift(b.dataset.id));
+
+  app.querySelectorAll('[data-action="submitpto"]').forEach(b=> b.onclick = ()=> submitPto());
+  app.querySelectorAll('[data-action="cancelpto"]').forEach(b=> b.onclick = ()=> cancelPto(b.dataset.id));
+  app.querySelectorAll('[data-action="approvepto"]').forEach(b=> b.onclick = ()=> approvePto(b.dataset.id));
+  app.querySelectorAll('[data-action="denypto"]').forEach(b=> b.onclick = ()=> denyPto(b.dataset.id));
 
   const lotSelect = app.querySelector('#lotSelect');
   if(lotSelect) lotSelect.onchange = ()=>{ managerLot = lotSelect.value; openDayKey=null; render(); };
@@ -948,6 +1239,11 @@ function bindEvents(){
     const assignSelect = app.querySelector('#newShiftAssign');
     if(assignSelect) assignSelect.innerHTML = slotOptionsHtml(newShiftDate.value, '');
   };
+  const newShiftOpen = app.querySelector('#newShiftOpen');
+  if(newShiftOpen) newShiftOpen.onchange = ()=>{
+    const assignSelect = app.querySelector('#newShiftAssign');
+    if(assignSelect) assignSelect.disabled = newShiftOpen.checked;
+  };
   app.querySelectorAll('[data-action="addcustomshift"]').forEach(b=> b.onclick = ()=> submitCustomShift());
 
   app.querySelectorAll('[data-action="editshift"]').forEach(b=> b.onclick = ()=>{
@@ -962,6 +1258,9 @@ function bindEvents(){
     let val = inp.value;
     if(inp.dataset.field==='customName' && val.trim()==='') val = null;
     updateShift(inp.dataset.shiftid, inp.dataset.field, val);
+  });
+  app.querySelectorAll('[data-action="toggleopen"]').forEach(inp=> inp.onchange = ()=>{
+    updateShift(inp.dataset.shiftid, 'open', inp.checked);
   });
   app.querySelectorAll('[data-action="addassignee"]').forEach(sel=> sel.onchange = ()=>{
     if(!sel.value) return;
@@ -978,11 +1277,10 @@ function bindEvents(){
   });
 
   app.querySelectorAll('[data-action="toggleday"]').forEach(b=> b.onclick = ()=>{
-    const emp = employees.find(e=>e.id===currentEmployeeId);
-    if(!emp) return;
+    if(!me) return;
     const date = b.dataset.date;
-    const current = (availability[emp.id] && availability[emp.id][date]) || null;
-    setDayState(emp.id, date, cycleState(current));
+    const current = (availability[me.id] && availability[me.id][date]) || null;
+    setDayState(me.id, date, cycleState(current));
   });
 
   app.querySelectorAll('[data-action="opendaybreakdown"]').forEach(th=> th.onclick = ()=>{
