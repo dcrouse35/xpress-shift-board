@@ -27,6 +27,7 @@ function rateFor(employeeId, positionId){
 
 let payRates = []; // [ {id, lot, positionId|null, payType:'hourly'|'salary', rate, qbPayrollItem} ] — standard rate for a location+position combo, e.g. "Driver at Tony's = $2.50/hr"; positionId null = applies regardless of position
 let qbCustomerOverrides = {}; // { lot: qbCustomerName } — only needed where the QuickBooks Customer differs from the location name itself, e.g. event venues like Apiary/Ashbourne
+let qbLocationOverrides = {}; // { lot: qbLocationFieldValue } — QuickBooks Time's "Location" custom field is a separate picklist with its own hierarchical names (e.g. "Lexington, KY:Dudley's and Frank & Dinos"), unrelated to the Customer/jobcode name above
 
 // Real QuickBooks Time payroll items, for autocomplete convenience only —
 // admins can still type anything, this just cuts down on typos that would
@@ -173,6 +174,7 @@ async function loadProtectedData(){
     availabilityLog = logRes.log;
     payRates = rateRes.payRates;
     qbCustomerOverrides = qbRes.qbCustomerOverrides;
+    qbLocationOverrides = qbRes.qbLocationOverrides || {};
     await loadTimesheets();
   }
   if(isFullAdmin()){
@@ -261,7 +263,7 @@ async function loginEmployee(email, password){
 async function logoutEmployee(){
   try{ await api('/api/auth/logout', { method:'POST' }); }catch(e){}
   me = null; admin = null; loginError = null; adminLoginError = null;
-  employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; payRates = []; qbCustomerOverrides = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
+  employees = []; availability = {}; weeklyAvailability = {}; weeklyAvailabilityLocked = false; availabilityLog = []; payRates = []; qbCustomerOverrides = {}; qbLocationOverrides = {}; shifts = []; swapRequests = []; ptoRequests = []; positions = []; groups = []; groupFilter = '';
   wages = {}; shiftTemplates = []; timeEntries = []; qbNeedsReview = []; clockStatus = null; admins = [];
   render();
 }
@@ -458,6 +460,14 @@ async function updateQbCustomerOverride(lot, qbCustomer){
   try{
     const res = await api('/api/qb-settings/customer-override', { method:'PUT', body: JSON.stringify({ lot, qbCustomer }) });
     qbCustomerOverrides = res.qbCustomerOverrides;
+  }catch(e){ payRateError = e.message; }
+  render();
+}
+
+async function updateQbLocationOverride(lot, qbLocation){
+  try{
+    const res = await api('/api/qb-settings/location-override', { method:'PUT', body: JSON.stringify({ lot, qbLocation }) });
+    qbLocationOverrides = res.qbLocationOverrides;
   }catch(e){ payRateError = e.message; }
   render();
 }
@@ -1835,6 +1845,7 @@ function knownLocationsHtml(){
 
 function renderQbSettings(){
   const locs = knownLocationsList();
+  const missingLocations = locs.filter(l=>!qbLocationOverrides[l]);
   return `<div class="card">
     <h2>QuickBooks Export Settings</h2>
     <p class="empty" style="padding:0 0 10px;">Most locations export to QuickBooks as a Customer of the exact same name. Only fill one in below where that's NOT true — e.g. an event venue like Apiary or Ashbourne that bills under a different Customer name than the location label used here.</p>
@@ -1842,6 +1853,17 @@ function renderQbSettings(){
       <div style="margin-top:10px;">
         <label style="margin-bottom:4px;">${l}</label>
         <input type="text" placeholder="Same as location" value="${qbCustomerOverrides[l]||''}" data-action="qbcustomeroverride" data-lot="${l}" />
+      </div>
+    `).join('')}
+  </div>
+  <div class="card">
+    <h2>QuickBooks "Location" Field Mapping</h2>
+    <p class="empty" style="padding:0 0 10px;">QuickBooks Time's "Location" custom field is a separate list from Customers, with its own names (e.g. "Lexington, KY:Dudley's and Frank &amp; Dinos") — check Feature Add-ons &gt; Custom Fields &gt; Location in QuickBooks Time for the exact spelling. Every location below needs one, or its hours will be excluded from the export as "needs review."</p>
+    ${missingLocations.length ? `<p class="err">${missingLocations.length} location${missingLocations.length===1?'':'s'} not mapped yet: ${missingLocations.join(', ')}</p>` : ''}
+    ${locs.map(l=>`
+      <div style="margin-top:10px;">
+        <label style="margin-bottom:4px;">${l}</label>
+        <input type="text" placeholder="e.g. Lexington, KY:Dudley's and Frank &amp; Dinos" value="${qbLocationOverrides[l]||''}" data-action="qblocationoverride" data-lot="${l}" />
       </div>
     `).join('')}
   </div>`;
@@ -2059,6 +2081,9 @@ function bindEvents(){
   app.querySelectorAll('[data-action="removepayrate"]').forEach(b=> b.onclick = ()=> removePayRate(b.dataset.id));
   app.querySelectorAll('[data-action="qbcustomeroverride"]').forEach(el=> el.onchange = ()=>{
     updateQbCustomerOverride(el.dataset.lot, el.value);
+  });
+  app.querySelectorAll('[data-action="qblocationoverride"]').forEach(el=> el.onchange = ()=>{
+    updateQbLocationOverride(el.dataset.lot, el.value);
   });
   app.querySelectorAll('input[name="newPositionColor"]').forEach(radio=>{
     const sync = ()=>{

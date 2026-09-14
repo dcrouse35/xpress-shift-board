@@ -10,7 +10,7 @@ function defaultData() {
   return {
     employees: [], availability: {}, weeklyAvailability: {}, availabilityChangeLog: [], shifts: [], weekLots: {}, swapRequests: [],
     admins: [], ptoRequests: [], positions: [], shiftTemplates: [], timeEntries: [], groups: [], payRates: [],
-    qbCustomerOverrides: {}
+    qbCustomerOverrides: {}, qbLocationOverrides: {}
   };
 }
 

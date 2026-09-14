@@ -467,8 +467,15 @@ app.delete('/api/pay-rates/:id', requireAdmin, (req, res) => {
 // Apiary, Ashbourne — bill under a different Customer name than the
 // location label we use day-to-day, so this lets an admin override just
 // those without touching the location name used everywhere else in the app.
+//
+// The "Location" custom field is a SEPARATE picklist from the Customer
+// list, with its own hierarchical naming (e.g. "Lexington, KY:Dudley's and
+// Frank & Dinos") that has nothing to do with either our location label or
+// the Customer/jobcode name — confirmed by a real (non-Test-Mode) import
+// rejecting a row with "Dudley's" is not a valid choice from the "Location"
+// list. So it needs its own override map, distinct from qbCustomerOverrides.
 app.get('/api/qb-settings', requireScheduler, (req, res) => {
-  res.json({ qbCustomerOverrides: db.data.qbCustomerOverrides });
+  res.json({ qbCustomerOverrides: db.data.qbCustomerOverrides, qbLocationOverrides: db.data.qbLocationOverrides });
 });
 
 app.put('/api/qb-settings/customer-override', requireAdmin, (req, res) => {
@@ -480,6 +487,17 @@ app.put('/api/qb-settings/customer-override', requireAdmin, (req, res) => {
   else delete db.data.qbCustomerOverrides[lot];
   db.persist();
   res.json({ qbCustomerOverrides: db.data.qbCustomerOverrides });
+});
+
+app.put('/api/qb-settings/location-override', requireAdmin, (req, res) => {
+  let { lot, qbLocation } = req.body || {};
+  lot = (lot || '').trim();
+  if (!lot) return res.status(400).json({ error: 'Missing location.' });
+  qbLocation = (qbLocation || '').trim();
+  if (qbLocation) db.data.qbLocationOverrides[lot] = qbLocation;
+  else delete db.data.qbLocationOverrides[lot];
+  db.persist();
+  res.json({ qbLocationOverrides: db.data.qbLocationOverrides });
 });
 
 // ---------- groups (labels for filtering/organizing staff, e.g. "Weekend Crew") ----------
@@ -954,10 +972,18 @@ function resolveTimesheetRows(weekStart) {
       return;
     }
     const shift = matchingShifts[0];
+    const qbLocation = db.data.qbLocationOverrides[shift.lot];
+    if (!qbLocation) {
+      needsReview.push({
+        employee: empName, date: t.date,
+        reason: `No QuickBooks Location mapping set for "${shift.lot}" (QuickBooks Time's Location list uses different names — set this under QuickBooks Settings)`
+      });
+      return;
+    }
     const jobcode = db.data.qbCustomerOverrides[shift.lot] || shift.lot;
     const rate = qbRateFor(shift.lot, shift.positionId || null);
     const payrollItem = (rate && rate.qbPayrollItem) || 'Regular Pay';
-    clean.push({ username: emp.email, date: t.date, jobcode, hours, location: shift.lot, payrollItem });
+    clean.push({ username: emp.email, date: t.date, jobcode, hours, location: qbLocation, payrollItem });
   });
 
   return { clean, needsReview };
